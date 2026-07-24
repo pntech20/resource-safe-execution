@@ -880,7 +880,7 @@ git diff --check
 Expected: all commands exit `0`, all tests pass, both validators accept the
 skill, and the probe emits valid JSON without sensitive process fields.
 
-- [x] **Step 3: Install locally without overwriting unreviewed data**
+- [x] **Step 3: Validate clean-copy installation without overwriting existing data**
 
 Target this Codex environment:
 

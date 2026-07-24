@@ -141,6 +141,11 @@ class RepositoryQualityTests(unittest.TestCase):
             "fixture- and CI-validated until hosted CI completes",
             task_six,
         )
+        self.assertIn(
+            "- [x] **Step 3: Validate clean-copy installation without "
+            "overwriting existing data**",
+            task_six,
+        )
         for step in range(1, 6):
             with self.subTest(step=step):
                 self.assertRegex(
@@ -279,6 +284,14 @@ class RepositoryQualityTests(unittest.TestCase):
         )
         self.assertIn(
             "https://github.com/vercel-labs/skills/releases/tag/v1.5.20",
+            compatibility,
+        )
+        self.assertIn(
+            "reject a symlinked source root and symlinked descendants",
+            compatibility,
+        )
+        self.assertIn(
+            "do not validate ancestors above the selected source root",
             compatibility,
         )
 

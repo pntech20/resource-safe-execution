@@ -6,6 +6,8 @@ The unchanged fixture [`behavior-scenarios.json`](../../tests/fixtures/behavior-
 
 Every evaluator was a fresh subagent dispatched with `fork_turns=none`. Each received only the canonical skill folder/SKILL.md and its exact scenario prompt. Evaluators did not receive the required signals, baseline response, approved design, implementation plan, or this scorecard. The responses were non-executed plans, and all evaluations ran on 2026-07-24.
 
+These responses are historical evaluation evidence, not evaluations of the current `SKILL.md`. The concurrency, renderer, and GPU evaluators used `SKILL.md` from commit `4f87a309675bc5529c65e44f9acdfaa3d19a731f` with SHA-256 `ce35f3f619dd8ee8c78e1dc9aad86416ecdbbc8a418aab071efbaeb1d75957a3`. The final cleanup rerun used the corrected `SKILL.md` from commit `c801ea86c328eb7886e767a4a836dccf46290405` with SHA-256 `6e649712cb50c20b04424cc27663e5901b1750966d05b696d40598f55fb9a1bc`. The machine-readable manifest records this provenance per response.
+
 ## Final results
 
 ### concurrency-pressure

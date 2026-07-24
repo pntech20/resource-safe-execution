@@ -3,13 +3,12 @@
   "evaluation_date": "2026-07-24",
   "harness": "Codex collaboration API",
   "scorer_identity": "/root/task6_forward_test",
-  "canonical_skill": {
-    "path": "skills/resource-safe-execution/SKILL.md",
-    "sha256": "52d1bf0ba9a1d20dbfe0d25843458f1717650465f7e979856afffcf361a89f51"
-  },
+  "evaluated_skill_path": "skills/resource-safe-execution/SKILL.md",
   "evaluations": [
     {
       "scenario_id": "concurrency-pressure",
+      "evaluated_skill_commit": "4f87a309675bc5529c65e44f9acdfaa3d19a731f",
+      "evaluated_skill_sha256": "ce35f3f619dd8ee8c78e1dc9aad86416ecdbbc8a418aab071efbaeb1d75957a3",
       "prompt_sha256": "24902a44c8d3dc900bd1cd109e83880753f85df96c1b26b30b541a2836341451",
       "response_path": "docs/evaluations/raw/skill-enabled/concurrency-pressure.md",
       "response_sha256": "c6409c4fb20d1a773e36b433c41ba38e0cb74ec01f89c6fb454e9edafcc2e29f",
@@ -19,6 +18,8 @@
     },
     {
       "scenario_id": "renderer-pressure",
+      "evaluated_skill_commit": "4f87a309675bc5529c65e44f9acdfaa3d19a731f",
+      "evaluated_skill_sha256": "ce35f3f619dd8ee8c78e1dc9aad86416ecdbbc8a418aab071efbaeb1d75957a3",
       "prompt_sha256": "63f1da32524a0f754d15b9bf9420a7f00fef037aeae4484e16ef83ffc41e431b",
       "response_path": "docs/evaluations/raw/skill-enabled/renderer-pressure.md",
       "response_sha256": "3dd1df1bb3380f60ebd877cb5baa141f7d96139152ae5fc8e4401655556746b4",
@@ -28,6 +29,8 @@
     },
     {
       "scenario_id": "cleanup-pressure",
+      "evaluated_skill_commit": "c801ea86c328eb7886e767a4a836dccf46290405",
+      "evaluated_skill_sha256": "6e649712cb50c20b04424cc27663e5901b1750966d05b696d40598f55fb9a1bc",
       "prompt_sha256": "55c91a0038707ece1dface59030ac3d9d49655d70337c452aca36285e59b288c",
       "response_path": "docs/evaluations/raw/skill-enabled/cleanup-pressure.md",
       "response_sha256": "5127a11ac7e4d266bc8593ece37ece890c5da0c1508c4b2058ecb1f9d957525b",
@@ -37,6 +40,8 @@
     },
     {
       "scenario_id": "gpu-assumption",
+      "evaluated_skill_commit": "4f87a309675bc5529c65e44f9acdfaa3d19a731f",
+      "evaluated_skill_sha256": "ce35f3f619dd8ee8c78e1dc9aad86416ecdbbc8a418aab071efbaeb1d75957a3",
       "prompt_sha256": "49c4c2da3092b47de97fe5168c554a6214e82df4d37abb0bb3a453196659ef21",
       "response_path": "docs/evaluations/raw/skill-enabled/gpu-assumption.md",
       "response_sha256": "b889098ba22f0a6917de2c37c65223adec7b480a7cda29cc51bf0213296b3539",

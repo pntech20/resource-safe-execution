@@ -58,6 +58,8 @@ def manifest_hashes() -> dict[PurePosixPath, str]:
 
 
 def payload_paths(source: Path) -> set[PurePosixPath]:
+    if source.is_symlink():
+        raise ValueError(f"source root is a symlink: {source}")
     paths: set[PurePosixPath] = set()
     for path in source.rglob("*"):
         relative = path.relative_to(source)
@@ -215,6 +217,42 @@ class InstallationTests(unittest.TestCase):
             else:
                 with self.assertRaisesRegex(ValueError, "symlink is not allowed"):
                     install_copy(source, root / "destination")
+
+    def test_symlinked_source_root_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            real_source = root / "real-source"
+            shutil.copytree(
+                SKILL_DIR,
+                real_source,
+                ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+            )
+            source = root / SKILL_DIR.name
+            try:
+                source.symlink_to(real_source, target_is_directory=True)
+            except OSError as exc:
+                self.skipTest(f"directory symlink creation unavailable: {exc}")
+
+            with self.assertRaisesRegex(ValueError, "source root is a symlink"):
+                install_copy(source, root / "destination")
+
+    def test_source_root_symlink_check_precedes_descendant_traversal(self) -> None:
+        seen: list[Path] = []
+
+        def simulated_symlink(path: Path) -> bool:
+            seen.append(path)
+            return path == SKILL_DIR
+
+        with mock.patch.object(
+            Path,
+            "is_symlink",
+            autospec=True,
+            side_effect=simulated_symlink,
+        ):
+            with self.assertRaisesRegex(ValueError, "source root is a symlink"):
+                payload_paths(SKILL_DIR)
+
+        self.assertEqual([SKILL_DIR], seen)
 
     def test_symlinked_pycache_directory_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

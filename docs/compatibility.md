@@ -17,11 +17,12 @@ actual client runtime evidence. Passing one category does not prove another.
 | OpenCode project | `.opencode/skills/resource-safe-execution` | Format and install validation by clean-copy tests | Not performed; no compatibility claim |
 
 The copy tests verify each hash before copying only the nine regular files in
-`skill-manifest.json`, reject symlinks and unexpected ordinary files, then
-require the destination paths and hashes to match exactly. They also parse the
-two-field frontmatter and require each direct local link to resolve inside every
-copied skill directory. They do not launch any proprietary client, so this
-repository currently has no actual client runtime validation.
+`skill-manifest.json`, reject a symlinked source root and symlinked descendants,
+and reject unexpected ordinary files before requiring destination paths and
+hashes to match exactly. They do not validate ancestors above the selected source root.
+They also parse the two-field frontmatter and require each direct local link to
+resolve inside every copied skill directory. They do not launch any proprietary
+client, so this repository currently has no actual client runtime validation.
 
 ## Platform and release evidence
 

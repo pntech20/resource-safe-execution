@@ -1,6 +1,7 @@
 import hashlib
 import json
 import re
+import subprocess
 import unittest
 from pathlib import Path, PurePosixPath
 
@@ -153,15 +154,10 @@ class SkillContractTests(unittest.TestCase):
         self.assertEqual("Codex collaboration API", manifest["harness"])
         self.assertEqual("/root/task6_forward_test", manifest["scorer_identity"])
 
-        canonical = manifest["canonical_skill"]
+        self.assertNotIn("canonical_skill", manifest)
         self.assertEqual(
             "skills/resource-safe-execution/SKILL.md",
-            canonical["path"],
-        )
-        canonical_path = REPO_ROOT / Path(*PurePosixPath(canonical["path"]).parts)
-        self.assertEqual(
-            hashlib.sha256(canonical_path.read_bytes()).hexdigest(),
-            canonical["sha256"],
+            manifest["evaluated_skill_path"],
         )
 
         fixture = json.loads(
@@ -179,10 +175,35 @@ class SkillContractTests(unittest.TestCase):
         })
         self.assertEqual(len(prompts), len(evaluations))
 
+        expected_commits = {
+            "concurrency-pressure": "4f87a309675bc5529c65e44f9acdfaa3d19a731f",
+            "renderer-pressure": "4f87a309675bc5529c65e44f9acdfaa3d19a731f",
+            "cleanup-pressure": "c801ea86c328eb7886e767a4a836dccf46290405",
+            "gpu-assumption": "4f87a309675bc5529c65e44f9acdfaa3d19a731f",
+        }
         unavailable_metadata = "not captured by collaboration API"
         for evaluation in evaluations:
             with self.subTest(scenario=evaluation["scenario_id"]):
                 scenario_id = evaluation["scenario_id"]
+                evaluated_commit = evaluation["evaluated_skill_commit"]
+                self.assertEqual(
+                    expected_commits[scenario_id],
+                    evaluated_commit,
+                )
+                evaluated_blob = subprocess.run(
+                    [
+                        "git",
+                        "show",
+                        f"{evaluated_commit}:{manifest['evaluated_skill_path']}",
+                    ],
+                    cwd=REPO_ROOT,
+                    check=True,
+                    capture_output=True,
+                ).stdout
+                self.assertEqual(
+                    hashlib.sha256(evaluated_blob).hexdigest(),
+                    evaluation["evaluated_skill_sha256"],
+                )
                 self.assertEqual(
                     hashlib.sha256(
                         prompts[scenario_id].encode("utf-8")
