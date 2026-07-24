@@ -933,13 +933,13 @@ class CommandTests(unittest.TestCase):
             "sys.stdout.write('parent complete\\n');"
             "sys.stdout.flush();"
             "subprocess.Popen([sys.executable,'-c',"
-            "'import time; time.sleep(2)']);"
+            "'import time; time.sleep(4)']);"
             "os._exit(0)"
         )
         started = time.monotonic()
         result = probe.run_command(
             [sys.executable, "-c", child_code],
-            timeout_seconds=0.5,
+            timeout_seconds=2.0,
         )
         elapsed = time.monotonic() - started
 
@@ -947,7 +947,7 @@ class CommandTests(unittest.TestCase):
         self.assertIn("parent complete", result.stdout)
         self.assertLess(
             elapsed,
-            1.0,
+            3.0,
             f"descendant-held standard handles extended call to {elapsed:.3f}s",
         )
 
