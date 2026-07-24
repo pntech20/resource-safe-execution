@@ -952,7 +952,9 @@ def parse_macos_displays(text: str) -> list[dict[str, object]]:
     payload = json.loads(text)
     if not isinstance(payload, dict):
         raise ValueError("system_profiler display JSON must be an object")
-    raw_devices = payload.get("SPDisplaysDataType", [])
+    if "SPDisplaysDataType" not in payload:
+        raise ValueError("system_profiler SPDisplaysDataType is missing")
+    raw_devices = payload["SPDisplaysDataType"]
     if isinstance(raw_devices, dict):
         raw_devices = [raw_devices]
     if not isinstance(raw_devices, list):

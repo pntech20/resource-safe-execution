@@ -147,6 +147,10 @@ class PlatformParserTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "display record"):
                     probe.parse_macos_displays(payload)
 
+    def test_parse_macos_displays_rejects_missing_source_key(self) -> None:
+        with self.assertRaisesRegex(ValueError, "SPDisplaysDataType"):
+            probe.parse_macos_displays("{}")
+
     def test_parse_windows_gpu_accepts_array_and_single_object_json(self) -> None:
         text = (FIXTURES / "windows-gpu.json").read_text(encoding="utf-8")
         devices = probe.parse_windows_gpu(text)
@@ -1739,7 +1743,7 @@ class SnapshotTests(unittest.TestCase):
         self,
     ) -> None:
         cases = (
-            ("Darwin", '{"SPDisplaysDataType": [{}]}'),
+            ("Darwin", "{}"),
             ("Windows", "[{}]"),
         )
         for system, payload in cases:
