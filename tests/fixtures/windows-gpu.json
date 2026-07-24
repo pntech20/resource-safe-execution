@@ -1,0 +1,18 @@
+[
+  {
+    "Name": "NVIDIA GeForce RTX 4070",
+    "AdapterRAM": 4293918720,
+    "DriverVersion": "32.0.15.7688",
+    "AdapterCompatibility": "NVIDIA"
+  },
+  {
+    "Name": "Intel® Arc™ Graphics",
+    "AdapterRAM": null,
+    "DriverVersion": "32.0.101.6559",
+    "AdapterCompatibility": "Intel Corporation"
+  },
+  {
+    "Name": null,
+    "AdapterRAM": "not-a-number"
+  }
+]

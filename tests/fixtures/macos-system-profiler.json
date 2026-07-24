@@ -1,0 +1,15 @@
+{
+  "SPDisplaysDataType": [
+    {
+      "sppci_model": "Apple M3 Pro",
+      "sppci_vendor": "Apple (0x106b)",
+      "spdisplays_vram_shared": "Shared",
+      "spdisplays_metalfamily": "Supported, Metal GPUFamily Apple 9"
+    },
+    {
+      "sppci_model": "Radeon Pro 5500M",
+      "sppci_vendor": "AMD (0x1002)",
+      "spdisplays_vram": "8 GB"
+    }
+  ]
+}

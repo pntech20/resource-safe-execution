@@ -2,6 +2,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -83,6 +84,190 @@ class LinuxParserTests(unittest.TestCase):
         parsed = probe.parse_linux_meminfo(text)
         self.assertEqual(16_384 * 1024, parsed["total_bytes"])
         self.assertEqual(8_192 * 1024, parsed["available_bytes"])
+
+
+class PlatformParserTests(unittest.TestCase):
+    def test_parse_nvidia_smi_preserves_driver_device_and_utilization_fields(
+        self,
+    ) -> None:
+        text = (FIXTURES / "nvidia-smi.csv").read_text(encoding="utf-8")
+        devices = probe.parse_nvidia_smi(text)
+        self.assertEqual(2, len(devices))
+        self.assertEqual(
+            {
+                "index": 0,
+                "name": "NVIDIA GeForce RTX 4090",
+                "driver_version": "555.85",
+                "memory_total_mib": 24564,
+                "memory_used_mib": 1024,
+                "utilization_percent": 12.0,
+            },
+            devices[0],
+        )
+        self.assertEqual("NVIDIA RTX™ A6000", devices[1]["name"])
+
+    def test_parse_macos_vm_stat_calculates_available_bytes(self) -> None:
+        text = (FIXTURES / "macos-vm-stat.txt").read_text(encoding="utf-8")
+        self.assertEqual(
+            {"available_bytes": (100 + 200 + 10) * 16_384},
+            probe.parse_macos_vm_stat(text),
+        )
+
+    def test_parse_macos_displays_normalizes_shared_and_dedicated_devices(
+        self,
+    ) -> None:
+        text = (FIXTURES / "macos-system-profiler.json").read_text(encoding="utf-8")
+        devices = probe.parse_macos_displays(text)
+        self.assertEqual(2, len(devices))
+        self.assertEqual("Apple", devices[0]["vendor"])
+        self.assertIsNone(devices[0]["memory_bytes"])
+        self.assertEqual(8 * 1024**3, devices[1]["memory_bytes"])
+        self.assert_gpu_contract(devices)
+
+    def test_parse_windows_gpu_accepts_array_and_single_object_json(self) -> None:
+        text = (FIXTURES / "windows-gpu.json").read_text(encoding="utf-8")
+        devices = probe.parse_windows_gpu(text)
+        self.assertEqual(2, len(devices))
+        self.assertEqual(4_293_918_720, devices[0]["memory_bytes"])
+        self.assertEqual("Intel", devices[1]["vendor"])
+        self.assertEqual("Intel® Arc™ Graphics", devices[1]["name"])
+        single = probe.parse_windows_gpu(
+            json.dumps(
+                {
+                    "Name": "AMD Radeon RX 7900 XTX",
+                    "AdapterRAM": 24_000_000_000,
+                    "DriverVersion": "31.0",
+                    "AdapterCompatibility": "Advanced Micro Devices",
+                }
+            )
+        )
+        self.assertEqual(1, len(single))
+        self.assertEqual("AMD", single[0]["vendor"])
+        self.assert_gpu_contract(devices + single)
+
+    def assert_gpu_contract(self, devices: list[dict[str, object]]) -> None:
+        required = {
+            "name",
+            "vendor",
+            "memory_bytes",
+            "driver_version",
+            "detection_source",
+            "backend_claims",
+        }
+        for device in devices:
+            self.assertTrue(required.issubset(device))
+            claims = device["backend_claims"]
+            self.assertTrue(claims)
+            self.assertTrue(
+                all(claim["verified_for_application"] is False for claim in claims)
+            )
+
+
+class ProcessParserTests(unittest.TestCase):
+    ALLOWED_KEYS = {"pid", "name", "cpu_percent", "memory_bytes"}
+
+    def test_parse_posix_processes_ignores_malformed_rows_and_limits_output(
+        self,
+    ) -> None:
+        text = (FIXTURES / "processes-posix.txt").read_text(encoding="utf-8")
+        processes = probe.parse_posix_processes(text, limit=1)
+        self.assertEqual(
+            [
+                {
+                    "pid": 101,
+                    "name": "python3",
+                    "cpu_percent": 12.5,
+                    "memory_bytes": 2048 * 1024,
+                }
+            ],
+            processes,
+        )
+        self.assertEqual(self.ALLOWED_KEYS, set(processes[0]))
+
+    def test_parse_windows_processes_handles_array_and_single_object(self) -> None:
+        text = (FIXTURES / "processes-windows.json").read_text(encoding="utf-8")
+        processes = probe.parse_windows_processes(text)
+        self.assertEqual(2, len(processes))
+        self.assertEqual("Rendérér", processes[1]["name"])
+        single = probe.parse_windows_processes(
+            json.dumps(
+                {
+                    "IDProcess": 404,
+                    "Name": "single",
+                    "PercentProcessorTime": 1,
+                    "WorkingSetPrivate": 4096,
+                }
+            )
+        )
+        self.assertEqual(404, single[0]["pid"])
+        for process in processes + single:
+            self.assertEqual(self.ALLOWED_KEYS, set(process))
+
+
+class PlatformCollectorTests(unittest.TestCase):
+    def test_macos_cpu_averages_two_ps_samples_per_logical_cpu(self) -> None:
+        samples = (
+            probe.CommandResult(0, "80.0\n80.0\n", ""),
+            probe.CommandResult(0, "160.0\n160.0\n", ""),
+        )
+        with (
+            mock.patch.object(probe, "run_command", side_effect=samples),
+            mock.patch.object(probe.os, "cpu_count", return_value=8),
+            mock.patch.object(probe.time, "sleep"),
+        ):
+            result = probe._collect_cpu("Darwin", 0.1)
+        self.assertEqual(30.0, result["utilization_percent"])
+
+    def test_windows_memory_uses_native_status_values(self) -> None:
+        with mock.patch.object(
+            probe, "_windows_memory_status", return_value=(16_000, 4_000)
+        ):
+            self.assertEqual(
+                {"total_bytes": 16_000, "available_bytes": 4_000},
+                probe._collect_memory("Windows"),
+            )
+
+    def test_macos_memory_combines_sysctl_total_with_vm_stat_available(
+        self,
+    ) -> None:
+        vm_stat = (FIXTURES / "macos-vm-stat.txt").read_text(encoding="utf-8")
+        results = (
+            probe.CommandResult(0, "17179869184\n", ""),
+            probe.CommandResult(0, vm_stat, ""),
+        )
+        with mock.patch.object(probe, "run_command", side_effect=results):
+            memory = probe._collect_memory("Darwin")
+        self.assertEqual(17_179_869_184, memory["total_bytes"])
+        self.assertEqual((100 + 200 + 10) * 16_384, memory["available_bytes"])
+
+    def test_windows_gpu_uses_cim_json_with_bounded_command_wrapper(self) -> None:
+        gpu_json = (FIXTURES / "windows-gpu.json").read_text(encoding="utf-8")
+        with (
+            mock.patch.object(
+                probe, "run_command", return_value=probe.CommandResult(0, gpu_json, "")
+            ) as command,
+            mock.patch.object(probe.shutil, "which", return_value=None),
+        ):
+            result = probe._collect_gpu("Windows")
+        self.assertEqual(2, len(result["devices"]))
+        args = command.call_args.args[0]
+        self.assertEqual("powershell.exe", args[0])
+        self.assertIn("Win32_VideoController", args[-1])
+
+    def test_windows_processes_use_cim_and_privacy_preserving_parser(self) -> None:
+        process_json = (FIXTURES / "processes-windows.json").read_text(
+            encoding="utf-8"
+        )
+        with mock.patch.object(
+            probe, "run_command", return_value=probe.CommandResult(0, process_json, "")
+        ) as command:
+            processes = probe._collect_processes("Windows")
+        self.assertEqual(2, len(processes))
+        self.assertEqual(ProcessParserTests.ALLOWED_KEYS, set(processes[0]))
+        self.assertIn(
+            "Win32_PerfFormattedData_PerfProc_Process",
+            command.call_args.args[0][-1],
+        )
 
 
 class SampleValidationTests(unittest.TestCase):
@@ -289,6 +474,42 @@ class SnapshotTests(unittest.TestCase):
             },
             disk_errors,
         )
+
+    def test_missing_windows_tool_degrades_gpu_only(self) -> None:
+        unavailable: list[dict[str, str]] = []
+        with mock.patch.object(
+            probe,
+            "run_command",
+            side_effect=FileNotFoundError("powershell.exe was not found"),
+        ):
+            result = probe._collect_degraded(
+                probe._collect_gpu,
+                ("Windows",),
+                "gpu.devices",
+                unavailable,
+                {"devices": []},
+            )
+        self.assertEqual({"devices": []}, result)
+        self.assertEqual("gpu.devices", unavailable[0]["metric"])
+        self.assertIn("powershell.exe", unavailable[0]["reason"])
+
+    def test_process_command_timeout_degrades_processes_only(self) -> None:
+        unavailable: list[dict[str, str]] = []
+        with mock.patch.object(
+            probe,
+            "run_command",
+            side_effect=subprocess.TimeoutExpired(["ps"], 5.0),
+        ):
+            result = probe._collect_degraded(
+                probe._collect_processes,
+                ("Darwin",),
+                "processes",
+                unavailable,
+                [],
+            )
+        self.assertEqual([], result)
+        self.assertEqual("processes", unavailable[0]["metric"])
+        self.assertIn("timed out", unavailable[0]["reason"])
 
 
 class CliTests(unittest.TestCase):

@@ -1,0 +1,20 @@
+[
+  {
+    "IDProcess": 101,
+    "Name": "python",
+    "PercentProcessorTime": 12.5,
+    "WorkingSetPrivate": 2097152
+  },
+  {
+    "IDProcess": 202,
+    "Name": "Rendérér",
+    "PercentProcessorTime": 5,
+    "WorkingSetPrivate": 1048576
+  },
+  {
+    "IDProcess": "bad",
+    "Name": "ignored",
+    "PercentProcessorTime": "bad",
+    "WorkingSetPrivate": 1
+  }
+]

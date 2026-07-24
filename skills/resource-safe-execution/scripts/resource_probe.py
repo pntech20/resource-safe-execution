@@ -4,10 +4,13 @@
 from __future__ import annotations
 
 import argparse
+import csv
+import ctypes
 import json
 import math
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -113,6 +116,273 @@ def parse_linux_meminfo(text: str) -> dict[str, int]:
     }
 
 
+def parse_nvidia_smi(text: str) -> list[dict[str, object]]:
+    """Parse the bounded NVIDIA CSV query as driver and device evidence."""
+    devices: list[dict[str, object]] = []
+    for row in csv.reader(text.splitlines()):
+        if len(row) != 6:
+            continue
+        try:
+            index = int(row[0].strip())
+            name = row[1].strip()
+            driver_version = row[2].strip()
+            memory_total_mib = int(row[3].strip())
+            memory_used_mib = int(row[4].strip())
+            utilization_percent = float(row[5].strip())
+        except ValueError:
+            continue
+        if (
+            index < 0
+            or not name
+            or not driver_version
+            or memory_total_mib < 0
+            or memory_used_mib < 0
+            or not math.isfinite(utilization_percent)
+        ):
+            continue
+        devices.append(
+            {
+                "index": index,
+                "name": name,
+                "driver_version": driver_version,
+                "memory_total_mib": memory_total_mib,
+                "memory_used_mib": memory_used_mib,
+                "utilization_percent": utilization_percent,
+            }
+        )
+    return devices
+
+
+def parse_macos_vm_stat(text: str) -> dict[str, int]:
+    """Parse vm_stat and count immediately reusable pages as available."""
+    page_size_match = re.search(r"page size of\s+(\d+)\s+bytes", text)
+    if page_size_match is None:
+        raise ValueError("vm_stat page size is missing")
+    page_size = int(page_size_match.group(1))
+    pages: dict[str, int] = {}
+    for line in text.splitlines():
+        match = re.match(r"\s*([^:]+):\s*(\d+)\.?\s*$", line)
+        if match:
+            pages[match.group(1).strip()] = int(match.group(2))
+    available_names = ("Pages free", "Pages inactive", "Pages speculative")
+    if not any(name in pages for name in available_names):
+        raise ValueError("vm_stat available page counters are missing")
+    available_pages = sum(pages.get(name, 0) for name in available_names)
+    return {"available_bytes": available_pages * page_size}
+
+
+def _vendor_name(*values: object) -> str:
+    evidence = " ".join(str(value) for value in values if value).lower()
+    if "nvidia" in evidence:
+        return "NVIDIA"
+    if "advanced micro devices" in evidence or "amd" in evidence or "radeon" in evidence:
+        return "AMD"
+    if "intel" in evidence:
+        return "Intel"
+    if "apple" in evidence:
+        return "Apple"
+    return "unknown"
+
+
+def _memory_label_bytes(value: object) -> int | None:
+    if not isinstance(value, str) or "shared" in value.lower():
+        return None
+    match = re.search(r"(\d+(?:\.\d+)?)\s*(GB|MB|KB)", value, re.IGNORECASE)
+    if match is None:
+        return None
+    multipliers = {"kb": 1024, "mb": 1024**2, "gb": 1024**3}
+    return int(float(match.group(1)) * multipliers[match.group(2).lower()])
+
+
+def _graphics_device(
+    *,
+    name: str,
+    vendor: str,
+    memory_bytes: int | None,
+    driver_version: str | None,
+    detection_source: str,
+    backend_name: str,
+) -> dict[str, object]:
+    return {
+        "name": name,
+        "vendor": vendor,
+        "memory_bytes": memory_bytes,
+        "driver_version": driver_version,
+        "detection_source": detection_source,
+        "backend_claims": [
+            {
+                "name": backend_name,
+                "verified_for_application": False,
+            }
+        ],
+    }
+
+
+def parse_macos_displays(text: str) -> list[dict[str, object]]:
+    """Normalize system_profiler display JSON without claiming app support."""
+    payload = json.loads(text)
+    if not isinstance(payload, dict):
+        raise ValueError("system_profiler display JSON must be an object")
+    raw_devices = payload.get("SPDisplaysDataType", [])
+    if isinstance(raw_devices, dict):
+        raw_devices = [raw_devices]
+    if not isinstance(raw_devices, list):
+        raise ValueError("system_profiler display list is malformed")
+
+    devices: list[dict[str, object]] = []
+    for raw in raw_devices:
+        if not isinstance(raw, dict):
+            continue
+        raw_name = raw.get("sppci_model") or raw.get("_name")
+        if not isinstance(raw_name, str) or not raw_name.strip():
+            continue
+        vendor_evidence = raw.get("sppci_vendor") or raw.get("spdisplays_vendor")
+        memory = _memory_label_bytes(
+            raw.get("spdisplays_vram") or raw.get("spdisplays_vram_shared")
+        )
+        driver = raw.get("spdisplays_gmux-version")
+        devices.append(
+            _graphics_device(
+                name=raw_name.strip(),
+                vendor=_vendor_name(vendor_evidence, raw_name),
+                memory_bytes=memory,
+                driver_version=driver.strip() if isinstance(driver, str) else None,
+                detection_source="system_profiler",
+                backend_name="metal-device",
+            )
+        )
+    return devices
+
+
+def _json_records(text: str, source: str) -> list[dict[str, object]]:
+    if not text.strip():
+        return []
+    payload = json.loads(text)
+    if isinstance(payload, dict):
+        return [payload]
+    if not isinstance(payload, list):
+        raise ValueError(f"{source} JSON must be an object or array")
+    return [record for record in payload if isinstance(record, dict)]
+
+
+def parse_windows_gpu(text: str) -> list[dict[str, object]]:
+    """Normalize one-or-many Win32_VideoController JSON records."""
+    devices: list[dict[str, object]] = []
+    for raw in _json_records(text, "Windows GPU"):
+        name = raw.get("Name")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        raw_memory = raw.get("AdapterRAM")
+        memory_bytes = (
+            int(raw_memory)
+            if isinstance(raw_memory, (int, float))
+            and not isinstance(raw_memory, bool)
+            and math.isfinite(raw_memory)
+            and raw_memory >= 0
+            else None
+        )
+        raw_driver = raw.get("DriverVersion")
+        driver_version = (
+            raw_driver.strip()
+            if isinstance(raw_driver, str) and raw_driver.strip()
+            else None
+        )
+        devices.append(
+            _graphics_device(
+                name=name.strip(),
+                vendor=_vendor_name(raw.get("AdapterCompatibility"), name),
+                memory_bytes=memory_bytes,
+                driver_version=driver_version,
+                detection_source="windows-cim",
+                backend_name="graphics-device",
+            )
+        )
+    return devices
+
+
+def parse_posix_processes(
+    text: str, limit: int = 5
+) -> list[dict[str, object]]:
+    """Parse ps output while retaining only the privacy-preserving fields."""
+    processes: list[dict[str, object]] = []
+    for line in text.splitlines():
+        fields = line.strip().split(maxsplit=3)
+        if len(fields) != 4:
+            continue
+        try:
+            pid = int(fields[0])
+            cpu_percent = float(fields[1])
+            memory_kib = int(fields[2])
+        except ValueError:
+            continue
+        name = fields[3].strip()
+        if (
+            pid <= 0
+            or not name
+            or memory_kib < 0
+            or not math.isfinite(cpu_percent)
+            or cpu_percent < 0
+        ):
+            continue
+        processes.append(
+            {
+                "pid": pid,
+                "name": name,
+                "cpu_percent": cpu_percent,
+                "memory_bytes": memory_kib * 1024,
+            }
+        )
+    processes.sort(
+        key=lambda item: (
+            -float(item["cpu_percent"]),
+            -int(item["memory_bytes"]),
+            int(item["pid"]),
+        )
+    )
+    return processes[: max(0, int(limit))]
+
+
+def parse_windows_processes(
+    text: str, limit: int = 5
+) -> list[dict[str, object]]:
+    """Parse CIM process JSON while retaining only four approved fields."""
+    processes: list[dict[str, object]] = []
+    for raw in _json_records(text, "Windows process"):
+        try:
+            pid = int(raw.get("IDProcess"))
+            cpu_percent = float(raw.get("PercentProcessorTime"))
+            memory_bytes = int(raw.get("WorkingSetPrivate"))
+        except (TypeError, ValueError):
+            continue
+        raw_name = raw.get("Name")
+        name = raw_name.strip() if isinstance(raw_name, str) else ""
+        if (
+            pid <= 0
+            or not name
+            or name.lower() in {"_total", "idle"}
+            or memory_bytes < 0
+            or not math.isfinite(cpu_percent)
+            or cpu_percent < 0
+        ):
+            continue
+        processes.append(
+            {
+                "pid": pid,
+                "name": name,
+                "cpu_percent": cpu_percent,
+                "memory_bytes": memory_bytes,
+            }
+        )
+    processes.sort(
+        key=lambda item: (
+            -float(item["cpu_percent"]),
+            -int(item["memory_bytes"]),
+            int(item["pid"]),
+        )
+    )
+    return processes[: max(0, int(limit))]
+
+
 def validate_sample_seconds(value: str) -> float:
     """Parse a finite sampling duration within the supported inclusive range."""
     try:
@@ -129,24 +399,118 @@ def validate_sample_seconds(value: str) -> float:
     return parsed
 
 
-def _collect_cpu(system: str, sample_seconds: float) -> dict[str, object]:
-    result: dict[str, object] = {"logical_cpus": os.cpu_count() or 1}
-    if system != "Linux":
-        return result
+def _checked_stdout(args: Sequence[str]) -> str:
+    result = run_command(args, timeout_seconds=5.0)
+    if result.returncode != 0:
+        reason = result.stderr.strip() or f"command exited with {result.returncode}"
+        raise RuntimeError(reason)
+    if not result.stdout.strip():
+        raise ValueError(f"{args[0]} returned no data")
+    return result.stdout
 
-    before_text = Path("/proc/stat").read_text(encoding="utf-8")
-    before = parse_linux_cpu_stat(before_text)
-    time.sleep(sample_seconds)
-    after_text = Path("/proc/stat").read_text(encoding="utf-8")
-    after = parse_linux_cpu_stat(after_text)
-    result["utilization_percent"] = calculate_cpu_percent(before, after)
+
+def _windows_cpu_times() -> tuple[int, int]:
+    class FileTime(ctypes.Structure):
+        _fields_ = (("low", ctypes.c_uint32), ("high", ctypes.c_uint32))
+
+    def value(file_time: FileTime) -> int:
+        return (int(file_time.high) << 32) | int(file_time.low)
+
+    idle = FileTime()
+    kernel = FileTime()
+    user = FileTime()
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    if not kernel32.GetSystemTimes(
+        ctypes.byref(idle), ctypes.byref(kernel), ctypes.byref(user)
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return value(kernel) + value(user), value(idle)
+
+
+def _windows_memory_status() -> tuple[int, int]:
+    class MemoryStatusEx(ctypes.Structure):
+        _fields_ = (
+            ("length", ctypes.c_uint32),
+            ("memory_load", ctypes.c_uint32),
+            ("total_physical", ctypes.c_uint64),
+            ("available_physical", ctypes.c_uint64),
+            ("total_page_file", ctypes.c_uint64),
+            ("available_page_file", ctypes.c_uint64),
+            ("total_virtual", ctypes.c_uint64),
+            ("available_virtual", ctypes.c_uint64),
+            ("available_extended_virtual", ctypes.c_uint64),
+        )
+
+    status = MemoryStatusEx()
+    status.length = ctypes.sizeof(status)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    if not kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return int(status.total_physical), int(status.available_physical)
+
+
+def _collect_cpu(system: str, sample_seconds: float) -> dict[str, object]:
+    logical_cpus = os.cpu_count() or 1
+    result: dict[str, object] = {"logical_cpus": logical_cpus}
+    if system == "Linux":
+        before = parse_linux_cpu_stat(
+            Path("/proc/stat").read_text(encoding="utf-8")
+        )
+        time.sleep(sample_seconds)
+        after = parse_linux_cpu_stat(
+            Path("/proc/stat").read_text(encoding="utf-8")
+        )
+        result["utilization_percent"] = calculate_cpu_percent(before, after)
+    elif system == "Windows":
+        before = _windows_cpu_times()
+        time.sleep(sample_seconds)
+        after = _windows_cpu_times()
+        result["utilization_percent"] = calculate_cpu_percent(before, after)
+    elif system == "Darwin":
+        samples = []
+        for sample_index in range(2):
+            output = _checked_stdout(["ps", "-A", "-o", "%cpu="])
+            values = []
+            for raw_value in output.splitlines():
+                try:
+                    value = float(raw_value.strip())
+                except ValueError:
+                    continue
+                if math.isfinite(value) and value >= 0:
+                    values.append(value)
+            if not values:
+                raise ValueError("ps returned no CPU percentages")
+            samples.append(sum(values))
+            if sample_index == 0:
+                time.sleep(sample_seconds)
+        result["utilization_percent"] = round(
+            min(100.0, max(0.0, sum(samples) / len(samples) / logical_cpus)),
+            1,
+        )
     return result
 
 
 def _collect_memory(system: str) -> dict[str, object]:
-    if system != "Linux":
-        return {}
-    return parse_linux_meminfo(Path("/proc/meminfo").read_text(encoding="utf-8"))
+    if system == "Linux":
+        return parse_linux_meminfo(Path("/proc/meminfo").read_text(encoding="utf-8"))
+    if system == "Windows":
+        total_bytes, available_bytes = _windows_memory_status()
+        return {
+            "total_bytes": total_bytes,
+            "available_bytes": available_bytes,
+        }
+    if system == "Darwin":
+        total_text = _checked_stdout(["sysctl", "-n", "hw.memsize"])
+        try:
+            total_bytes = int(total_text.strip())
+        except ValueError as exc:
+            raise ValueError("sysctl hw.memsize is not an integer") from exc
+        memory: dict[str, object] = {"total_bytes": total_bytes}
+        memory.update(
+            parse_macos_vm_stat(_checked_stdout(["vm_stat"]))
+        )
+        return memory
+    return {}
 
 
 def _collect_disk(working_directory: str | None) -> dict[str, object]:
@@ -160,14 +524,169 @@ def _collect_disk(working_directory: str | None) -> dict[str, object]:
     }
 
 
-def _collect_gpu(system: str) -> dict[str, object]:
-    del system
-    return {"devices": []}
+def _linux_gpu_devices() -> list[dict[str, object]]:
+    devices: list[dict[str, object]] = []
+    vendor_ids = {
+        "0x10de": "NVIDIA",
+        "0x1002": "AMD",
+        "0x8086": "Intel",
+    }
+    for card in sorted(Path("/sys/class/drm").glob("card[0-9]*")):
+        device_path = card / "device"
+        vendor_path = device_path / "vendor"
+        if not vendor_path.is_file():
+            continue
+        vendor_id = vendor_path.read_text(encoding="utf-8").strip().lower()
+        vendor = vendor_ids.get(vendor_id, "unknown")
+        device_id_path = device_path / "device"
+        device_id = (
+            device_id_path.read_text(encoding="utf-8").strip()
+            if device_id_path.is_file()
+            else "unknown"
+        )
+        devices.append(
+            _graphics_device(
+                name=f"{vendor} graphics device {device_id}",
+                vendor=vendor,
+                memory_bytes=None,
+                driver_version=None,
+                detection_source="linux-sysfs",
+                backend_name="graphics-device",
+            )
+        )
+    return devices
+
+
+def _nvidia_devices() -> list[dict[str, object]]:
+    output = _checked_stdout(
+        [
+            "nvidia-smi",
+            "--query-gpu=index,name,driver_version,memory.total,memory.used,"
+            "utilization.gpu",
+            "--format=csv,noheader,nounits",
+        ]
+    )
+    devices = []
+    for raw in parse_nvidia_smi(output):
+        normalized = _graphics_device(
+            name=str(raw["name"]),
+            vendor="NVIDIA",
+            memory_bytes=int(raw["memory_total_mib"]) * 1024**2,
+            driver_version=str(raw["driver_version"]),
+            detection_source="nvidia-smi",
+            backend_name="cuda-driver",
+        )
+        normalized.update(raw)
+        devices.append(normalized)
+    if not devices:
+        raise ValueError("nvidia-smi returned no valid device rows")
+    return devices
+
+
+def _collect_gpu(
+    system: str,
+    unavailable: list[dict[str, str]] | None = None,
+) -> dict[str, object]:
+    if system == "Windows":
+        output = _checked_stdout(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Get-CimInstance Win32_VideoController | "
+                "Select-Object Name,AdapterRAM,DriverVersion,"
+                "AdapterCompatibility | ConvertTo-Json -Compress",
+            ]
+        )
+        devices = parse_windows_gpu(output)
+    elif system == "Darwin":
+        devices = parse_macos_displays(
+            _checked_stdout(
+                ["system_profiler", "SPDisplaysDataType", "-json"]
+            )
+        )
+    elif system == "Linux":
+        devices = _linux_gpu_devices()
+    else:
+        devices = []
+
+    if shutil.which("nvidia-smi"):
+        try:
+            nvidia_devices = _nvidia_devices()
+        except Exception as exc:
+            if unavailable is not None:
+                unavailable.append(
+                    _unavailable("gpu.nvidia", _bounded_reason(exc))
+                )
+        else:
+            devices = [
+                device for device in devices if device.get("vendor") != "NVIDIA"
+            ]
+            devices.extend(nvidia_devices)
+    return {"devices": devices}
 
 
 def _collect_processes(system: str) -> list[dict[str, object]]:
-    del system
+    if system == "Windows":
+        output = _checked_stdout(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Get-CimInstance "
+                "Win32_PerfFormattedData_PerfProc_Process | "
+                "Select-Object IDProcess,Name,PercentProcessorTime,"
+                "WorkingSetPrivate | ConvertTo-Json -Compress",
+            ]
+        )
+        return parse_windows_processes(output)
+    if system in {"Linux", "Darwin"}:
+        return parse_posix_processes(
+            _checked_stdout(["ps", "-axo", "pid=,pcpu=,rss=,comm="])
+        )
     return []
+
+
+def _collect_power(system: str) -> dict[str, object]:
+    if system == "Darwin":
+        output = _checked_stdout(["pmset", "-g", "batt"])
+        result: dict[str, object] = {"detection_source": "pmset"}
+        source_match = re.search(r"Now drawing from '([^']+)'", output)
+        percent_match = re.search(r"(\d+)%", output)
+        if source_match:
+            result["source"] = source_match.group(1)
+        if percent_match:
+            result["battery_percent"] = int(percent_match.group(1))
+        return result
+    if system == "Linux":
+        supplies = Path("/sys/class/power_supply")
+        if not supplies.is_dir():
+            return {}
+        for supply in sorted(supplies.iterdir()):
+            type_path = supply / "type"
+            if not type_path.is_file():
+                continue
+            supply_type = type_path.read_text(encoding="utf-8").strip()
+            if supply_type != "Battery":
+                continue
+            result = {
+                "detection_source": "linux-sysfs",
+                "source": supply_type,
+            }
+            capacity_path = supply / "capacity"
+            status_path = supply / "status"
+            if capacity_path.is_file():
+                result["battery_percent"] = int(
+                    capacity_path.read_text(encoding="utf-8").strip()
+                )
+            if status_path.is_file():
+                result["status"] = status_path.read_text(
+                    encoding="utf-8"
+                ).strip()
+            return result
+    return {}
 
 
 def _bounded_reason(error: BaseException) -> str:
@@ -284,10 +803,17 @@ def collect_snapshot(
     )
     gpu = _collect_degraded(
         _collect_gpu,
-        (system,),
+        (system, unavailable),
         "gpu.devices",
         unavailable,
         {"devices": []},
+    )
+    power = _collect_degraded(
+        _collect_power,
+        (system,),
+        "platform.power",
+        unavailable,
+        {},
     )
     if include_processes:
         processes = _collect_degraded(
@@ -304,6 +830,7 @@ def collect_snapshot(
     assert isinstance(memory, dict)
     assert isinstance(disk, dict)
     assert isinstance(gpu, dict)
+    assert isinstance(power, dict)
     assert isinstance(processes, list)
 
     if "logical_cpus" not in cpu:
@@ -368,15 +895,19 @@ def collect_snapshot(
             )
         )
 
+    platform_snapshot: dict[str, object] = {
+        "system": system,
+        "release": platform.release(),
+        "machine": platform.machine(),
+    }
+    if power:
+        platform_snapshot["power"] = power
+
     return {
         "schema_version": SCHEMA_VERSION,
         "probe_version": PROBE_VERSION,
         "timestamp": _timestamp_utc(),
-        "platform": {
-            "system": system,
-            "release": platform.release(),
-            "machine": platform.machine(),
-        },
+        "platform": platform_snapshot,
         "cpu": cpu,
         "memory": memory,
         "disk": disk,
