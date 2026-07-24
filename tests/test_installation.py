@@ -1,3 +1,4 @@
+import contextlib
 import hashlib
 import json
 import shutil
@@ -60,10 +61,10 @@ def payload_paths(source: Path) -> set[PurePosixPath]:
     paths: set[PurePosixPath] = set()
     for path in source.rglob("*"):
         relative = path.relative_to(source)
-        if "__pycache__" in relative.parts or path.suffix == ".pyc":
-            continue
         if path.is_symlink():
             raise ValueError(f"symlink is not allowed in payload: {relative.as_posix()}")
+        if "__pycache__" in relative.parts or path.suffix == ".pyc":
+            continue
         if path.is_file():
             paths.add(PurePosixPath(relative.as_posix()))
         elif not path.is_dir():
@@ -214,6 +215,74 @@ class InstallationTests(unittest.TestCase):
             else:
                 with self.assertRaisesRegex(ValueError, "symlink is not allowed"):
                     install_copy(source, root / "destination")
+
+    def test_symlinked_pycache_directory_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / SKILL_DIR.name
+            shutil.copytree(
+                SKILL_DIR,
+                source,
+                ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+            )
+            target = root / "outside-cache"
+            target.mkdir()
+            cache = source / "scripts" / "__pycache__"
+            try:
+                cache.symlink_to(target, target_is_directory=True)
+            except OSError:
+                cache.mkdir()
+                original_is_symlink = Path.is_symlink
+
+                def simulated_symlink(path: Path) -> bool:
+                    return path == cache or original_is_symlink(path)
+
+                symlink_patch = mock.patch.object(
+                    Path,
+                    "is_symlink",
+                    autospec=True,
+                    side_effect=simulated_symlink,
+                )
+            else:
+                symlink_patch = contextlib.nullcontext()
+
+            with symlink_patch:
+                with self.assertRaisesRegex(ValueError, "symlink is not allowed"):
+                    payload_paths(source)
+
+    def test_symlinked_pyc_file_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / SKILL_DIR.name
+            shutil.copytree(
+                SKILL_DIR,
+                source,
+                ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+            )
+            target = root / "outside.pyc"
+            target.write_bytes(b"outside")
+            cached = source / "scripts" / "resource_probe.pyc"
+            try:
+                cached.symlink_to(target)
+            except OSError:
+                shutil.copyfile(target, cached)
+                original_is_symlink = Path.is_symlink
+
+                def simulated_symlink(path: Path) -> bool:
+                    return path == cached or original_is_symlink(path)
+
+                symlink_patch = mock.patch.object(
+                    Path,
+                    "is_symlink",
+                    autospec=True,
+                    side_effect=simulated_symlink,
+                )
+            else:
+                symlink_patch = contextlib.nullcontext()
+
+            with symlink_patch:
+                with self.assertRaisesRegex(ValueError, "symlink is not allowed"):
+                    payload_paths(source)
 
     def test_unexpected_ordinary_file_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

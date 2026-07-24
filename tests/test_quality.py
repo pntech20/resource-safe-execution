@@ -122,6 +122,38 @@ class RepositoryQualityTests(unittest.TestCase):
             r"(no|not|without) (?:actual |proprietary )?client runtime validation",
         )
 
+    def test_release_plan_separates_fixture_and_hosted_ci_evidence(self) -> None:
+        plan = (
+            REPO_ROOT
+            / "docs"
+            / "superpowers"
+            / "plans"
+            / "2026-07-24-resource-safe-execution-v1.md"
+        ).read_text(encoding="utf-8")
+        task_six = plan.split("### Task 6:", 1)[1]
+        normalized_task_six = " ".join(task_six.split())
+        self.assertIn(
+            "Mark macOS and Linux as fixture-validated only. Mark them as "
+            "CI-validated only after hosted CI succeeds.",
+            normalized_task_six,
+        )
+        self.assertNotIn(
+            "fixture- and CI-validated until hosted CI completes",
+            task_six,
+        )
+        for step in range(1, 6):
+            with self.subTest(step=step):
+                self.assertRegex(
+                    task_six,
+                    rf"- \[x\] \*\*Step {step}: [^*]+\*\*",
+                )
+        for step in (6, 7):
+            with self.subTest(step=step):
+                self.assertRegex(
+                    task_six,
+                    rf"- \[ \] \*\*Step {step}: [^*]+\*\*",
+                )
+
     def test_documentation_records_bounded_child_and_output_lifecycle(self) -> None:
         paths = (
             REPO_ROOT / "README.md",

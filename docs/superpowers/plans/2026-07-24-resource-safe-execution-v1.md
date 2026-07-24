@@ -830,7 +830,7 @@ git commit -m "docs: add portable installation and CI"
 - Produces: Honest behavior evidence, local Codex installation evidence, a
   clean release candidate, and no unverified compatibility claim.
 
-- [ ] **Step 1: Run skill-enabled behavior evaluations**
+- [x] **Step 1: Run skill-enabled behavior evaluations**
 
 Dispatch the four original prompts to fresh agents. Give each agent only the
 canonical skill folder and the scenario prompt. Score the unchanged required
@@ -842,7 +842,7 @@ Expected: every required signal is `present`. If not, add the minimum explicit
 counter to `SKILL.md`, rerun contract tests, and repeat only the failed
 scenario with a fresh agent.
 
-- [ ] **Step 2: Run complete local verification**
+- [x] **Step 2: Run complete local verification**
 
 Run:
 
@@ -858,7 +858,7 @@ git diff --check
 Expected: all commands exit `0`, all tests pass, both validators accept the
 skill, and the probe emits valid JSON without sensitive process fields.
 
-- [ ] **Step 3: Install locally without overwriting unreviewed data**
+- [x] **Step 3: Install locally without overwriting unreviewed data**
 
 Target this Codex environment:
 
@@ -871,15 +871,16 @@ local installation. Validate the repository candidate and manifest-driven
 clean-copy layout independently, and record the installed copy as historical
 evidence if it differs from the final candidate.
 
-- [ ] **Step 4: Update release status honestly**
+- [x] **Step 4: Update release status honestly**
 
 Mark format validation and simulated clean installs separately from runtime
 client testing. Mark Windows as physically exercised on this host. Mark
-macOS and Linux as fixture- and CI-validated until hosted CI completes. Keep
-the release at `v0.1.0` if Claude Code, Antigravity, physical macOS, or
-physical Linux runtime checks remain unavailable.
+macOS and Linux as fixture-validated only. Mark them as CI-validated only
+after hosted CI succeeds. Keep the release at `v0.1.0` if Claude Code,
+Antigravity, physical macOS, or physical Linux runtime checks remain
+unavailable.
 
-- [ ] **Step 5: Commit release evidence**
+- [x] **Step 5: Commit release evidence**
 
 ```powershell
 git add README.md docs/compatibility.md docs/evaluations/2026-07-24-skill-enabled.md skills/resource-safe-execution/SKILL.md

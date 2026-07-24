@@ -131,7 +131,8 @@ class SkillContractTests(unittest.TestCase):
             "locate the task-scoped ownership record",
             "identify its owned root and group",
             "verify the root pid plus start identity",
-            "invoke only the recorded graceful cleanup",
+            "invoke only the recorded graceful cleanup and owned-group or "
+            "owned-tree termination apis",
             "if any step lacks evidence, refuse termination",
         )
         for clause in required_clauses:
