@@ -52,6 +52,8 @@ Monitor CPU saturation, available memory, paging, disk pressure, GPU memory and 
 
 Stop only the verified owned process group or tree with its recorded cleanup API. Refuse executable-name-wide cleanup, even under time or resource pressure. Verify exit, retain relevant logs, remove task-scoped temporary state, and restore renderer or backend configuration changed for the task. Leave persistent processes running only when the ownership record declares them persistent.
 
+When cleanup is requested without an ownership record, the response must still give this conditional safe procedure: locate the task-scoped ownership record, identify its owned root and group, verify the root PID plus start identity, invoke only the recorded graceful cleanup and owned-group or owned-tree termination APIs, then verify exit. If any step lacks evidence, refuse termination and name the missing evidence; never substitute executable-name commands.
+
 ## Non-negotiable safeguards
 
 - Keep all inspection read-only until the launch plan, resource profile, and ownership record are defined.

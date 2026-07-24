@@ -62,6 +62,20 @@ are not actual client runtime validation. See the
 [compatibility evidence and limits](docs/compatibility.md) before making a
 client-specific claim.
 
+### Release status
+
+The release candidate remains `v0.1.0`. All 17 required skill-enabled behavior
+signals are present in the [auditable evaluation](docs/evaluations/2026-07-24-skill-enabled.md),
+and the canonical package is installed byte-identically in this host's active
+Codex skills directory.
+
+Windows was physically exercised on this host with the live probe, both
+validators, and the 54-test repository suite. macOS and Linux have
+deterministic fixture coverage and configured hosted CI, but those hosted jobs
+have not completed. Claude Code, Antigravity, physical macOS, physical Linux,
+and proprietary client runtime checks remain unperformed; no runtime
+compatibility claim is made.
+
 ## Run the probe directly
 
 ```powershell
