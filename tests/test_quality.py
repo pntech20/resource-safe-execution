@@ -146,18 +146,16 @@ class RepositoryQualityTests(unittest.TestCase):
             "overwriting existing data**",
             task_six,
         )
-        for step in range(1, 6):
+        for step in range(1, 7):
             with self.subTest(step=step):
                 self.assertRegex(
                     task_six,
                     rf"- \[x\] \*\*Step {step}: [^*]+\*\*",
                 )
-        for step in (6, 7):
-            with self.subTest(step=step):
-                self.assertRegex(
-                    task_six,
-                    rf"- \[ \] \*\*Step {step}: [^*]+\*\*",
-                )
+        self.assertRegex(
+            task_six,
+            r"- \[ \] \*\*Step 7: [^*]+\*\*",
+        )
 
     def test_documentation_records_bounded_child_and_output_lifecycle(self) -> None:
         paths = (

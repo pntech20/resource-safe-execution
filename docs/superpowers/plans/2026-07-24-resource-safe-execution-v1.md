@@ -909,7 +909,7 @@ git add README.md docs/compatibility.md docs/evaluations/2026-07-24-skill-enable
 git commit -m "test: document skill behavior evaluation"
 ```
 
-- [ ] **Step 6: Request final whole-branch review**
+- [x] **Step 6: Request final whole-branch review**
 
 Generate a review package from the merge base through `HEAD`. Give a fresh
 reviewer the design specification, this plan, evaluation reports, and package.

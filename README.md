@@ -101,17 +101,18 @@ client-specific claim.
 
 ### Release status
 
-The release candidate remains `v0.1.0`. All 17 required skill-enabled behavior
+The release is `v0.1.0`. All 17 required skill-enabled behavior
 signals are present in the [auditable evaluation](docs/evaluations/2026-07-24-skill-enabled.md),
 and final-review provenance is hash-checked by the repository suite. The
-existing local Codex installation was not overwritten during final review.
+local Codex installation contains the exact nine manifest-listed files.
 
 Windows was physically exercised on this host with the live probe, both
-validators, and the repository suite. macOS and Linux have deterministic
-fixture coverage and configured hosted CI, but those hosted jobs have not
-completed. Claude Code, Antigravity, physical macOS, physical Linux, and
-proprietary client runtime checks remain unperformed; no runtime compatibility
-claim is made.
+validators, and the repository suite. The
+[hosted CI run](https://github.com/pntech20/resource-safe-execution/actions/runs/30098155287)
+passed all six Windows, macOS, and Ubuntu jobs on Python 3.10 and 3.13,
+including a live JSON smoke probe. Physical macOS, physical Linux, Claude
+Code, Antigravity, and other proprietary client runtime checks remain
+unperformed; no physical-host or client-runtime claim is inferred from CI.
 
 ## Run the probe directly
 

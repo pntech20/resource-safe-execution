@@ -28,14 +28,16 @@ client, so this repository currently has no actual client runtime validation.
 
 | Platform | Physical host evidence | Fixture evidence | Hosted CI evidence |
 | --- | --- | --- | --- |
-| Windows | Physically exercised on this host: the probe emitted valid JSON, process summaries contained no sensitive fields, both validators passed, and the repository suite passed | Windows process and GPU fixtures pass | Workflow configured; hosted run pending |
-| macOS | No physical Mac exercised | `vm_stat` and `system_profiler` fixtures pass | Workflow configured; hosted run pending |
-| Linux | No physical Linux host exercised | `/proc/stat`, `/proc/meminfo`, and POSIX process fixtures pass | Workflow configured; hosted run pending |
+| Windows | Physically exercised on this host: the probe emitted valid JSON, process summaries contained no sensitive fields, both validators passed, and the repository suite passed | Windows process and GPU fixtures pass | CI passed on Python 3.10 and 3.13, including the live JSON smoke probe |
+| macOS | No physical Mac exercised | `vm_stat` and `system_profiler` fixtures pass | CI passed on Python 3.10 and 3.13, including the live JSON smoke probe |
+| Linux | No physical Linux host exercised | `/proc/stat`, `/proc/meminfo`, and POSIX process fixtures pass | CI passed on Python 3.10 and 3.13, including the live JSON smoke probe |
 
-Before final review, the local Codex installation copied 9 tracked canonical
-files to `C:\Users\Admin\.codex\skills\resource-safe-execution`. A
-relative-path and SHA-256 comparison reported that earlier candidate
-byte-identical, and this command exited `0`:
+Hosted evidence: [GitHub Actions run 30098155287](https://github.com/pntech20/resource-safe-execution/actions/runs/30098155287), six of six jobs successful.
+
+After final review, the local Codex installation copied the 9 tracked
+canonical files to
+`C:\Users\Admin\.codex\skills\resource-safe-execution`. Exact relative-path
+and SHA-256 comparison against `skill-manifest.json` passed, as did:
 
 ```powershell
 python tests/validate_skill.py C:\Users\Admin\.codex\skills\resource-safe-execution
@@ -47,12 +49,11 @@ Result:
 Valid skill: C:\Users\Admin\.codex\skills\resource-safe-execution
 ```
 
-Final review intentionally did not overwrite that local installation. The
-release candidate remains `v0.1.0`. Claude Code, Antigravity, physical macOS,
-physical Linux, and every proprietary client runtime check remain unavailable
-or unperformed. Hosted macOS and Linux CI must complete before claiming CI
-validation; fixtures and a configured workflow are not substitutes for a
-completed hosted run.
+The previous local installation was preserved as a timestamped backup. The
+release is `v0.1.0`. Claude Code, Antigravity, physical macOS, physical Linux,
+and every proprietary client runtime check remain unavailable or unperformed.
+The completed hosted run supports CI-validation claims only; it is not a
+substitute for physical-host or proprietary-client evidence.
 
 ## Sources and claim limits
 
