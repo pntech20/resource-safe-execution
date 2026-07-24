@@ -130,6 +130,23 @@ class PlatformParserTests(unittest.TestCase):
         self.assertEqual(8 * 1024**3, devices[1]["memory_bytes"])
         self.assert_gpu_contract(devices)
 
+    def test_parse_macos_displays_distinguishes_empty_from_malformed_records(
+        self,
+    ) -> None:
+        self.assertEqual(
+            [],
+            probe.parse_macos_displays('{"SPDisplaysDataType": []}'),
+        )
+        malformed_payloads = (
+            '{"SPDisplaysDataType": [{}]}',
+            '{"SPDisplaysDataType": [42]}',
+            '{"SPDisplaysDataType": [{"sppci_model": "   "}]}',
+        )
+        for payload in malformed_payloads:
+            with self.subTest(payload=payload):
+                with self.assertRaisesRegex(ValueError, "display record"):
+                    probe.parse_macos_displays(payload)
+
     def test_parse_windows_gpu_accepts_array_and_single_object_json(self) -> None:
         text = (FIXTURES / "windows-gpu.json").read_text(encoding="utf-8")
         devices = probe.parse_windows_gpu(text)
@@ -150,6 +167,22 @@ class PlatformParserTests(unittest.TestCase):
         self.assertEqual(1, len(single))
         self.assertEqual("AMD", single[0]["vendor"])
         self.assert_gpu_contract(devices + single)
+
+    def test_parse_windows_gpu_distinguishes_empty_from_malformed_records(
+        self,
+    ) -> None:
+        for payload in ("", "[]"):
+            with self.subTest(payload=payload):
+                self.assertEqual([], probe.parse_windows_gpu(payload))
+        malformed_payloads = (
+            "[{}]",
+            "[42]",
+            '[{"Name": "   "}]',
+        )
+        for payload in malformed_payloads:
+            with self.subTest(payload=payload):
+                with self.assertRaisesRegex(ValueError, "GPU record"):
+                    probe.parse_windows_gpu(payload)
 
     def assert_gpu_contract(self, devices: list[dict[str, object]]) -> None:
         required = {
@@ -1360,6 +1393,60 @@ class SnapshotTests(unittest.TestCase):
             with self.subTest(value=value):
                 with self.assertRaises(ValueError):
                     probe.collect_snapshot(sample_seconds=value)
+
+    def test_malformed_platform_gpu_payload_marks_gpu_base_unavailable(
+        self,
+    ) -> None:
+        cases = (
+            ("Darwin", '{"SPDisplaysDataType": [{}]}'),
+            ("Windows", "[{}]"),
+        )
+        for system, payload in cases:
+            with (
+                self.subTest(system=system),
+                mock.patch.object(probe.platform, "system", return_value=system),
+                mock.patch.object(
+                    probe,
+                    "_collect_cpu",
+                    return_value={
+                        "logical_cpus": 8,
+                        "utilization_percent": 20.0,
+                    },
+                ),
+                mock.patch.object(
+                    probe,
+                    "_collect_memory",
+                    return_value={"total_bytes": 100, "available_bytes": 50},
+                ),
+                mock.patch.object(
+                    probe,
+                    "_collect_disk",
+                    return_value={
+                        "total_bytes": 1000,
+                        "used_bytes": 500,
+                        "free_bytes": 500,
+                    },
+                ),
+                mock.patch.object(probe, "_collect_power", return_value={}),
+                mock.patch.object(probe, "_checked_stdout", return_value=payload),
+                mock.patch.object(
+                    probe,
+                    "resolve_trusted_executable",
+                    side_effect=FileNotFoundError(
+                        "no trusted executable candidate for nvidia-smi"
+                    ),
+                ),
+            ):
+                snapshot = probe.collect_snapshot(sample_seconds=0.1)
+
+            base_failures = [
+                item
+                for item in snapshot["unavailable"]
+                if item["metric"] == "gpu.base"
+            ]
+            self.assertEqual({"devices": []}, snapshot["gpu"])
+            self.assertEqual(1, len(base_failures))
+            self.assertLessEqual(len(base_failures[0]["reason"]), 200)
 
     def test_collect_snapshot_has_exact_stable_top_level_schema(self) -> None:
         with (

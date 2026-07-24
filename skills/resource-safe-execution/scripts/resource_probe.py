@@ -765,10 +765,14 @@ def parse_macos_displays(text: str) -> list[dict[str, object]]:
     devices: list[dict[str, object]] = []
     for raw in raw_devices:
         if not isinstance(raw, dict):
-            continue
+            raise ValueError(
+                "system_profiler display record must be an object"
+            )
         raw_name = raw.get("sppci_model") or raw.get("_name")
         if not isinstance(raw_name, str) or not raw_name.strip():
-            continue
+            raise ValueError(
+                "system_profiler display record name is missing"
+            )
         vendor_evidence = raw.get("sppci_vendor") or raw.get("spdisplays_vendor")
         memory = _memory_label_bytes(
             raw.get("spdisplays_vram") or raw.get("spdisplays_vram_shared")
@@ -787,7 +791,12 @@ def parse_macos_displays(text: str) -> list[dict[str, object]]:
     return devices
 
 
-def _json_records(text: str, source: str) -> list[dict[str, object]]:
+def _json_records(
+    text: str,
+    source: str,
+    *,
+    reject_non_objects: bool = False,
+) -> list[dict[str, object]]:
     if not text.strip():
         return []
     payload = json.loads(text)
@@ -795,16 +804,24 @@ def _json_records(text: str, source: str) -> list[dict[str, object]]:
         return [payload]
     if not isinstance(payload, list):
         raise ValueError(f"{source} JSON must be an object or array")
+    if reject_non_objects and any(
+        not isinstance(record, dict) for record in payload
+    ):
+        raise ValueError(f"{source} record must be an object")
     return [record for record in payload if isinstance(record, dict)]
 
 
 def parse_windows_gpu(text: str) -> list[dict[str, object]]:
     """Normalize one-or-many Win32_VideoController JSON records."""
     devices: list[dict[str, object]] = []
-    for raw in _json_records(text, "Windows GPU"):
+    for raw in _json_records(
+        text,
+        "Windows GPU",
+        reject_non_objects=True,
+    ):
         name = raw.get("Name")
         if not isinstance(name, str) or not name.strip():
-            continue
+            raise ValueError("Windows GPU record name is missing")
         raw_memory = raw.get("AdapterRAM")
         memory_bytes = (
             int(raw_memory)
