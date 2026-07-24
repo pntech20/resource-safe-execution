@@ -1,0 +1,4 @@
+interface:
+  display_name: "Resource Safe Execution"
+  short_description: "Run resource-heavy tasks safely"
+  default_prompt: "Use $resource-safe-execution to preflight this resource-intensive task and choose a safe execution profile."
