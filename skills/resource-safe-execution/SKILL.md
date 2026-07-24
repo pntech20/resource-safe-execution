@@ -18,7 +18,7 @@ Follow the numbered sections in order. Re-run preflight after a material workloa
 3. Record the task directory, intended commands, expected duration, interactive-use needs, and recovery constraints.
 4. Treat probe recommendations as conservative guidance. Reduce work further when the machine remains unresponsive.
 
-The probe performs read-only host inspection unless an explicit `--output` path requests its optional output-file write. That write creates a new file exclusively and refuses an existing path or symlink. The probe never terminates pre-existing or unrelated processes; it may stop only its own diagnostic child when the five-second timeout or one-MiB combined-output bound overflows. This guidance is not permission to launch or terminate workload processes.
+The probe performs read-only host inspection. On POSIX, an explicit `--output` path requests its only optional write; directory-handle-relative no-follow traversal creates a new file exclusively. Windows v0.1 requires stdout and rejects `--output`. Diagnostic calls use native or fixed system roots rather than inherited `PATH`, retain at most one MiB through temporary capture files, and have a five-second deadline plus a 0.25-second cleanup grace, so descendant-held standard handles cannot extend the call. The probe never terminates pre-existing or unrelated processes; it may stop only the owned Windows diagnostic child or newly created POSIX diagnostic group after timeout or output overflow. This guidance is not permission to launch or terminate workload processes.
 
 ## 2. Classify the workload
 
@@ -56,7 +56,7 @@ When cleanup is requested without an ownership record, the response must still g
 
 ## Non-negotiable safeguards
 
-- Keep host inspection read-only until the launch plan, resource profile, and ownership record are defined; treat an explicitly requested probe output file as task-scoped state.
+- Keep host inspection read-only until the launch plan, resource profile, and ownership record are defined; on POSIX, treat an explicitly requested probe output file as task-scoped state.
 - Bound concurrency and preserve the selected profile's recovery headroom.
 - Reject broad termination by executable name; identify an owned root and verify its start identity first.
 - Reproduce hardware-renderer failure before fallback, verify the active renderer, scope fallback to the task, and restore normal configuration.

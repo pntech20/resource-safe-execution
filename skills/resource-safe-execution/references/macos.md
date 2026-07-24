@@ -16,3 +16,5 @@ Confirm that the application exposes the intended Metal or other accelerated bac
 ## macOS cautions
 
 Use a process group or retained launcher handle where supported. Record a platform process start time and compare it with the PID before cleanup. Respect memory-pressure and thermal signals. Keep renderer overrides task-scoped and restore the normal configuration.
+
+The bundled probe accepts only root-owned diagnostic executables whose canonical ancestors are root-owned, not group/other-writable, and not exposed through a detectable ACL/current-user write grant. Its optional `--output` uses held directory descriptors, no-follow traversal, and exclusive creation so an ancestor swap cannot redirect the file.

@@ -16,3 +16,5 @@ Inspect the application's selected CUDA, ROCm, Vulkan, OpenGL, WebGPU, or other 
 ## Linux cautions
 
 Prefer a dedicated process group, session, cgroup, container, or retained launcher handle. Record `/proc/<pid>/stat` start ticks or an equivalent platform start identity and compare it before cleanup. Account for container quotas rather than host totals. Keep software-renderer environment changes task-scoped and restore normal configuration.
+
+The bundled probe accepts only root-owned diagnostic executables whose canonical ancestors are root-owned, not group/other-writable, and not exposed through a detectable ACL/current-user write grant. Its optional `--output` uses held directory descriptors, no-follow traversal, and exclusive creation so an ancestor swap cannot redirect the file.

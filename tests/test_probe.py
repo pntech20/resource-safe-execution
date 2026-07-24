@@ -4,12 +4,15 @@ import inspect
 import io
 import json
 import os
+import shutil
+import stat
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 
@@ -564,7 +567,7 @@ class CommandTests(unittest.TestCase):
         def poll(self) -> int | None:
             return self.returncode
 
-        def wait(self) -> int:
+        def wait(self, timeout: float | None = None) -> int:
             self.waited = True
             if self.returncode is None:
                 self.returncode = -9
@@ -648,9 +651,23 @@ class CommandTests(unittest.TestCase):
         self.assertEqual("", result.stderr)
 
     def test_run_command_uses_trusted_cwd_and_sanitized_environment(self) -> None:
-        child = self.FakeProcess(stdout=b"ok")
+        child = self.FakeProcess()
+        sinks: list[object] = []
+
+        def start_child(*args: object, **kwargs: object) -> object:
+            stdout = kwargs["stdout"]
+            stderr = kwargs["stderr"]
+            stdout.write(b"ok")
+            stdout.flush()
+            sinks.extend((stdout, stderr))
+            return child
+
         with (
-            mock.patch.object(probe.subprocess, "Popen", return_value=child) as popen,
+            mock.patch.object(
+                probe.subprocess,
+                "Popen",
+                side_effect=start_child,
+            ) as popen,
             mock.patch.object(
                 probe.subprocess,
                 "run",
@@ -684,6 +701,55 @@ class CommandTests(unittest.TestCase):
         self.assertNotIn("PYTHONPATH", kwargs["env"])
         self.assertNotIn("VIRTUAL_ENV", kwargs["env"])
         self.assertNotIn("HOME", kwargs["env"])
+        self.assertTrue(all(sink.closed for sink in sinks))
+
+    def test_windows_environment_uses_native_validated_roots_not_spoofed_env(
+        self,
+    ) -> None:
+        native_windows = Path("/native/windows")
+        native_program_files = Path("/native/program-files")
+        with (
+            mock.patch.object(probe.platform, "system", return_value="Windows"),
+            mock.patch.object(
+                probe,
+                "_windows_directory",
+                return_value=native_windows,
+                create=True,
+            ),
+            mock.patch.object(
+                probe,
+                "_windows_program_files_directory",
+                return_value=native_program_files,
+                create=True,
+            ),
+            mock.patch.object(
+                probe,
+                "_windows_path_is_secure",
+                return_value=True,
+                create=True,
+            ),
+            mock.patch.dict(
+                probe.os.environ,
+                {
+                    "SystemRoot": "/spoof/windows",
+                    "WINDIR": "/spoof/windows",
+                    "ProgramFiles": "/spoof/program-files",
+                    "PATH": "/spoof/path",
+                    "CUDA_PATH": "/spoof/cuda",
+                },
+                clear=True,
+            ),
+        ):
+            environment = probe._sanitized_environment()
+
+        self.assertEqual(
+            {
+                "SystemRoot": str(native_windows),
+                "WINDIR": str(native_windows),
+                "ProgramFiles": str(native_program_files),
+            },
+            environment,
+        )
 
     def test_output_overflow_kills_only_owned_child_and_caps_capture(
         self,
@@ -692,12 +758,24 @@ class CommandTests(unittest.TestCase):
         error_type = getattr(probe, "CommandOutputLimitError", None)
         self.assertEqual(1_048_576, output_limit)
         self.assertIsNotNone(error_type)
-        child = self.FakeProcess(
-            stdout=b"x" * 700_000,
-            stderr=b"y" * 400_000,
-            running=True,
-        )
-        with mock.patch.object(probe.subprocess, "Popen", return_value=child):
+        child = self.FakeProcess(running=True)
+        sinks: list[object] = []
+
+        def start_child(*args: object, **kwargs: object) -> object:
+            stdout = kwargs["stdout"]
+            stderr = kwargs["stderr"]
+            stdout.write(b"x" * 700_000)
+            stderr.write(b"y" * 400_000)
+            stdout.flush()
+            stderr.flush()
+            sinks.extend((stdout, stderr))
+            return child
+
+        with mock.patch.object(
+            probe.subprocess,
+            "Popen",
+            side_effect=start_child,
+        ):
             with self.assertRaises(error_type) as caught:
                 probe.run_command([sys.executable, "-V"])
 
@@ -707,8 +785,7 @@ class CommandTests(unittest.TestCase):
         )
         self.assertTrue(child.killed)
         self.assertTrue(child.waited)
-        self.assertTrue(child.stdout.closed)
-        self.assertTrue(child.stderr.closed)
+        self.assertTrue(all(sink.closed for sink in sinks))
 
     def test_real_oversized_child_is_stopped_at_combined_byte_limit(self) -> None:
         with self.assertRaises(probe.CommandOutputLimitError) as caught:
@@ -732,7 +809,17 @@ class CommandTests(unittest.TestCase):
         error_type = getattr(probe, "CommandTimeoutError", None)
         self.assertIsNotNone(error_type)
         child = self.FakeProcess(running=True)
-        with mock.patch.object(probe.subprocess, "Popen", return_value=child):
+        sinks: list[object] = []
+
+        def start_child(*args: object, **kwargs: object) -> object:
+            sinks.extend((kwargs["stdout"], kwargs["stderr"]))
+            return child
+
+        with mock.patch.object(
+            probe.subprocess,
+            "Popen",
+            side_effect=start_child,
+        ):
             with self.assertRaisesRegex(
                 error_type,
                 "diagnostic child timed out",
@@ -744,8 +831,57 @@ class CommandTests(unittest.TestCase):
 
         self.assertTrue(child.killed)
         self.assertTrue(child.waited)
-        self.assertTrue(child.stdout.closed)
-        self.assertTrue(child.stderr.closed)
+        self.assertTrue(all(sink.closed for sink in sinks))
+
+    def test_cleanup_wait_cannot_exceed_fixed_grace(self) -> None:
+        class NeverReapedProcess(self.FakeProcess):
+            def kill(self) -> None:
+                self.killed = True
+
+            def wait(self, timeout: float | None = None) -> int:
+                self.waited = True
+                if timeout:
+                    time.sleep(timeout)
+                raise subprocess.TimeoutExpired(["diagnostic"], timeout)
+
+        child = NeverReapedProcess(running=True)
+        started = time.monotonic()
+        with (
+            mock.patch.object(
+                probe.platform,
+                "system",
+                return_value="Windows",
+            ),
+            mock.patch.object(
+                probe.subprocess,
+                "Popen",
+                return_value=child,
+            ),
+            mock.patch.object(
+                probe,
+                "_trusted_working_directory",
+                return_value=Path(os.path.abspath(os.sep)),
+            ),
+            mock.patch.object(
+                probe,
+                "_sanitized_environment",
+                return_value={},
+            ),
+        ):
+            with self.assertRaises(probe.CommandTimeoutError):
+                probe.run_command(
+                    [sys.executable, "-V"],
+                    timeout_seconds=0.05,
+                )
+        elapsed = time.monotonic() - started
+
+        self.assertTrue(child.killed)
+        self.assertTrue(child.waited)
+        self.assertLess(
+            elapsed,
+            0.5,
+            f"cleanup exceeded timeout plus fixed grace: {elapsed:.3f}s",
+        )
 
     def test_real_timed_out_child_is_stopped_before_natural_exit(self) -> None:
         started = time.monotonic()
@@ -756,7 +892,35 @@ class CommandTests(unittest.TestCase):
             )
         self.assertLess(time.monotonic() - started, 1.0)
 
-    def test_trusted_resolution_ignores_cwd_and_path_shadows(self) -> None:
+    def test_descendant_inheriting_standard_handles_cannot_extend_deadline(
+        self,
+    ) -> None:
+        child_code = (
+            "import os,subprocess,sys;"
+            "sys.stdout.write('parent complete\\n');"
+            "sys.stdout.flush();"
+            "subprocess.Popen([sys.executable,'-c',"
+            "'import time; time.sleep(2)']);"
+            "os._exit(0)"
+        )
+        started = time.monotonic()
+        result = probe.run_command(
+            [sys.executable, "-c", child_code],
+            timeout_seconds=0.5,
+        )
+        elapsed = time.monotonic() - started
+
+        self.assertEqual(0, result.returncode)
+        self.assertIn("parent complete", result.stdout)
+        self.assertLess(
+            elapsed,
+            1.0,
+            f"descendant-held standard handles extended call to {elapsed:.3f}s",
+        )
+
+    def test_trusted_resolution_uses_native_windows_anchor_not_environment(
+        self,
+    ) -> None:
         resolver = getattr(probe, "resolve_trusted_executable", None)
         self.assertIsNotNone(resolver)
         with tempfile.TemporaryDirectory() as temporary:
@@ -776,10 +940,35 @@ class CommandTests(unittest.TestCase):
             (shadow / "powershell.exe").write_bytes(b"shadow")
 
             with (
+                mock.patch.object(
+                    probe,
+                    "_windows_directory",
+                    return_value=system_root,
+                    create=True,
+                ),
+                mock.patch.object(
+                    probe,
+                    "_windows_system_directory",
+                    return_value=system_root / "System32",
+                    create=True,
+                ),
+                mock.patch.object(
+                    probe,
+                    "_windows_program_files_directory",
+                    return_value=root / "Program Files",
+                    create=True,
+                ),
+                mock.patch.object(
+                    probe,
+                    "_windows_path_is_secure",
+                    side_effect=lambda candidate, *args, **kwargs: candidate.is_file(),
+                    create=True,
+                ),
                 mock.patch.dict(
                     probe.os.environ,
                     {
-                        "SystemRoot": str(system_root),
+                        "SystemRoot": str(shadow),
+                        "WINDIR": str(shadow),
                         "PATH": str(shadow),
                     },
                     clear=True,
@@ -794,7 +983,9 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(trusted, resolved)
         self.assertNotEqual(shadow / "powershell.exe", resolved)
 
-    def test_windows_nvidia_resolution_ignores_path_shadow(self) -> None:
+    def test_windows_nvidia_resolution_uses_native_program_files_anchor(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             program_files = root / "Program Files"
@@ -810,13 +1001,39 @@ class CommandTests(unittest.TestCase):
             shadow.mkdir()
             (shadow / "nvidia-smi.exe").write_bytes(b"shadow")
 
-            with mock.patch.dict(
-                probe.os.environ,
-                {
-                    "ProgramFiles": str(program_files),
-                    "PATH": str(shadow),
-                },
-                clear=True,
+            with (
+                mock.patch.object(
+                    probe,
+                    "_windows_directory",
+                    return_value=root / "Windows",
+                    create=True,
+                ),
+                mock.patch.object(
+                    probe,
+                    "_windows_system_directory",
+                    return_value=root / "Windows" / "System32",
+                    create=True,
+                ),
+                mock.patch.object(
+                    probe,
+                    "_windows_program_files_directory",
+                    return_value=program_files,
+                    create=True,
+                ),
+                mock.patch.object(
+                    probe,
+                    "_windows_path_is_secure",
+                    side_effect=lambda candidate, *args, **kwargs: candidate.is_file(),
+                    create=True,
+                ),
+                mock.patch.dict(
+                    probe.os.environ,
+                    {
+                        "ProgramFiles": str(shadow),
+                        "PATH": str(shadow),
+                    },
+                    clear=True,
+                ),
             ):
                 resolved = probe.resolve_trusted_executable(
                     "nvidia-smi",
@@ -825,6 +1042,61 @@ class CommandTests(unittest.TestCase):
 
         self.assertEqual(trusted, resolved)
         self.assertNotEqual(shadow / "nvidia-smi.exe", resolved)
+
+    @unittest.skipUnless(
+        os.name == "nt",
+        "requires Windows token access checks",
+    )
+    def test_windows_path_security_rejects_user_writable_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            trusted_root = Path(temporary)
+            candidate = trusted_root / "tool.exe"
+            candidate.write_bytes(b"test")
+            self.assertFalse(
+                probe._windows_path_is_secure(candidate, trusted_root)
+            )
+
+    @unittest.skipUnless(
+        os.name == "nt",
+        "requires Windows junction semantics",
+    )
+    def test_windows_path_security_rejects_reparse_parent(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target = root / "target"
+            target.mkdir()
+            candidate = target / "tool.exe"
+            candidate.write_bytes(b"test")
+            junction = root / "junction"
+            result = subprocess.run(
+                [
+                    os.environ.get("ComSpec", r"C:\Windows\System32\cmd.exe"),
+                    "/d",
+                    "/c",
+                    "mklink",
+                    "/J",
+                    str(junction),
+                    str(target),
+                ],
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode != 0:
+                self.skipTest(
+                    "Windows junction creation unavailable: "
+                    + (result.stderr.strip() or result.stdout.strip())
+                )
+            with mock.patch.object(
+                probe,
+                "_windows_current_user_can_write",
+                return_value=False,
+            ):
+                self.assertFalse(
+                    probe._windows_path_is_secure(
+                        junction / candidate.name,
+                        junction,
+                    )
+                )
 
     def test_posix_resolution_ignores_path_shadow_and_rejects_symlink(
         self,
@@ -848,6 +1120,12 @@ class CommandTests(unittest.TestCase):
                     "POSIX_TRUSTED_DIRECTORIES",
                     (trusted_root,),
                 ),
+                mock.patch.object(
+                    probe,
+                    "_posix_candidate_is_secure",
+                    return_value=True,
+                    create=True,
+                ),
                 mock.patch.dict(probe.os.environ, {"PATH": str(shadow)}, clear=True),
             ):
                 self.assertEqual(
@@ -870,6 +1148,80 @@ class CommandTests(unittest.TestCase):
                         "no trusted executable candidate for ps",
                     ):
                         resolver("ps", system="Linux")
+
+    def test_posix_metadata_rejects_user_owned_0555_executable(self) -> None:
+        metadata = SimpleNamespace(
+            st_uid=1000,
+            st_mode=stat.S_IFREG | 0o555,
+        )
+        self.assertFalse(
+            probe._posix_metadata_is_secure(
+                metadata,
+                require_directory=False,
+            )
+        )
+
+    def test_posix_metadata_rejects_writable_parent_directory(self) -> None:
+        metadata = SimpleNamespace(
+            st_uid=0,
+            st_mode=stat.S_IFDIR | 0o775,
+        )
+        self.assertFalse(
+            probe._posix_metadata_is_secure(
+                metadata,
+                require_directory=True,
+            )
+        )
+
+    def test_posix_candidate_rejects_acl_granted_current_user_write(self) -> None:
+        candidate = Path("/usr/bin/ps")
+        root = Path("/usr/bin")
+        trusted_metadata = SimpleNamespace(
+            st_uid=0,
+            st_mode=stat.S_IFREG | 0o555,
+        )
+        trusted_directory = SimpleNamespace(
+            st_uid=0,
+            st_mode=stat.S_IFDIR | 0o755,
+        )
+
+        def metadata(path: Path) -> object:
+            return trusted_metadata if path == candidate else trusted_directory
+
+        with (
+            mock.patch.object(probe.Path, "stat", autospec=True, side_effect=metadata),
+            mock.patch.object(probe.Path, "is_symlink", return_value=False),
+            mock.patch.object(
+                probe,
+                "_posix_current_user_can_write",
+                return_value=True,
+                create=True,
+            ),
+        ):
+            self.assertFalse(
+                probe._posix_candidate_is_secure(candidate, root)
+            )
+
+    @unittest.skipUnless(
+        os.name == "posix" and shutil.which("setfacl"),
+        "requires POSIX plus setfacl to exercise a real ACL",
+    )
+    def test_posix_acl_write_capability_is_detected_when_available(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            candidate = Path(temporary) / "tool"
+            candidate.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            candidate.chmod(0o555)
+            subprocess.run(
+                [
+                    shutil.which("setfacl") or "setfacl",
+                    "-m",
+                    f"u:{os.getuid()}:rw",
+                    str(candidate),
+                ],
+                check=True,
+                capture_output=True,
+            )
+            self.assertTrue(probe._posix_current_user_can_write(candidate))
 
 
 class RecommendationTests(unittest.TestCase):
@@ -1232,6 +1584,10 @@ class CliTests(unittest.TestCase):
             self.assertIn(heading, stdout)
         self.assertEqual("", stderr)
 
+    @unittest.skipIf(
+        os.name == "nt",
+        "Windows v0.1 output files fail closed; use stdout",
+    )
     def test_output_file_success_does_not_duplicate_to_stdout(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             output = Path(temp_dir) / "snapshot.json"
@@ -1246,6 +1602,10 @@ class CliTests(unittest.TestCase):
             self.assertEqual(sample_snapshot(), json.loads(output.read_text("utf-8")))
             self.assertEqual("", stderr)
 
+    @unittest.skipIf(
+        os.name == "nt",
+        "Windows v0.1 output files fail closed; use stdout",
+    )
     def test_existing_output_file_is_rejected_without_overwrite(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             output = Path(temp_dir) / "snapshot.json"
@@ -1262,6 +1622,10 @@ class CliTests(unittest.TestCase):
             self.assertIn("already exists", stderr)
             self.assertEqual("keep me", output.read_text(encoding="utf-8"))
 
+    @unittest.skipIf(
+        os.name == "nt",
+        "Windows v0.1 output files fail closed; use stdout",
+    )
     def test_symlink_output_file_is_rejected_without_following(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             directory = Path(temp_dir)
@@ -1299,12 +1663,102 @@ class CliTests(unittest.TestCase):
             self.assertIn("symlink", stderr)
             self.assertEqual("keep target", target.read_text(encoding="utf-8"))
 
+    def test_windows_output_file_write_fails_closed_to_stdout(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            probe.platform,
+            "system",
+            return_value="Windows",
+        ):
+            output = Path(temporary) / "snapshot.json"
+            with self.assertRaisesRegex(OSError, "stdout"):
+                probe._write_output_exclusive(output, "{}\n")
+            self.assertFalse(output.exists())
+
+    @unittest.skipUnless(
+        os.name == "nt",
+        "requires Windows junction semantics",
+    )
+    def test_windows_output_rejects_junction_parent(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target = root / "target"
+            target.mkdir()
+            junction = root / "junction"
+            result = subprocess.run(
+                [
+                    os.environ.get("ComSpec", r"C:\Windows\System32\cmd.exe"),
+                    "/d",
+                    "/c",
+                    "mklink",
+                    "/J",
+                    str(junction),
+                    str(target),
+                ],
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode != 0:
+                self.skipTest(
+                    "Windows junction creation unavailable: "
+                    + (result.stderr.strip() or result.stdout.strip())
+                )
+            with self.assertRaisesRegex(OSError, "stdout"):
+                probe._write_output_exclusive(
+                    junction / "snapshot.json",
+                    "{}\n",
+                )
+            self.assertFalse((target / "snapshot.json").exists())
+
+    @unittest.skipUnless(
+        os.name == "posix",
+        "requires POSIX dir_fd traversal",
+    )
+    def test_parent_swap_cannot_redirect_posix_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            original_parent = root / "safe"
+            original_parent.mkdir()
+            moved_parent = root / "safe-held"
+            attacker_parent = root / "attacker"
+            attacker_parent.mkdir()
+            destination = original_parent / "snapshot.json"
+            original_open = probe.os.open
+            swapped = False
+
+            def swapping_open(
+                path: object,
+                flags: int,
+                mode: int = 0o777,
+                *,
+                dir_fd: int | None = None,
+            ) -> int:
+                nonlocal swapped
+                if os.fspath(path) == destination.name and dir_fd is not None:
+                    original_parent.rename(moved_parent)
+                    original_parent.symlink_to(
+                        attacker_parent,
+                        target_is_directory=True,
+                    )
+                    swapped = True
+                return original_open(path, flags, mode, dir_fd=dir_fd)
+
+            with mock.patch.object(probe.os, "open", side_effect=swapping_open):
+                probe._write_output_exclusive(destination, "{}\n")
+
+            self.assertTrue(swapped, "output was not created relative to a held dirfd")
+            self.assertEqual("{}\n", (moved_parent / destination.name).read_text())
+            self.assertFalse((attacker_parent / destination.name).exists())
+
     def test_invalid_sampling_returns_exit_code_two(self) -> None:
         result, stdout, stderr = self.run_main(["--sample-seconds", "0"])
         self.assertEqual(2, result)
         self.assertEqual("", stdout)
         self.assertIn("sample", stderr.lower())
 
+    @unittest.skipIf(
+        os.name == "nt",
+        "Windows v0.1 output files fail closed; use stdout",
+    )
     def test_unwritable_output_returns_exit_code_one(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             output = Path(temp_dir) / "missing-parent" / "snapshot.json"

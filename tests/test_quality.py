@@ -189,6 +189,39 @@ class RepositoryQualityTests(unittest.TestCase):
         self.assertIn("create", documentation)
         self.assertIn("exclusively", documentation)
 
+    def test_documentation_states_hardened_trust_and_platform_boundaries(
+        self,
+    ) -> None:
+        paths = (
+            REPO_ROOT / "README.md",
+            REPO_ROOT / "SECURITY.md",
+            REPO_ROOT
+            / "docs"
+            / "superpowers"
+            / "specs"
+            / "2026-07-24-resource-safe-execution-design.md",
+            REPO_ROOT
+            / "docs"
+            / "superpowers"
+            / "plans"
+            / "2026-07-24-resource-safe-execution-v1.md",
+        )
+        documentation = " ".join(
+            path.read_text(encoding="utf-8") for path in paths
+        ).lower()
+        required = (
+            "native windows apis",
+            "inherited path",
+            "privileged system-directory mutation",
+            "0.25-second cleanup grace",
+            "descendant-held standard handles",
+            "posix directory-handle-relative",
+            "windows v0.1 requires stdout",
+        )
+        for phrase in required:
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, documentation)
+
     def test_installation_docs_pin_reviewed_payload_and_convenience_route(
         self,
     ) -> None:

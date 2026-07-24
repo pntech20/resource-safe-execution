@@ -6,9 +6,9 @@
 > checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Publish a portable Agent Skill and probe for read-only host
-inspection, with an explicit optional output-file write, that help coding
+inspection, with an explicit optional POSIX output-file write, that help coding
 agents plan, launch, monitor, and clean up resource-intensive work safely on
-Windows, macOS, and Linux.
+Windows, macOS, and Linux. Windows v0.1 requires stdout.
 
 **Architecture:** Keep portable policy in one standards-compliant
 `SKILL.md`, move platform detail into directly linked references, and expose
@@ -30,11 +30,17 @@ library, `unittest`, GitHub Actions, PowerShell/CIM, macOS system tools, Linux
 - The runtime requires Python 3.10+ and uses only the standard library.
 - The runtime performs no network access, telemetry, package installation, or
   privilege escalation. It never terminates pre-existing or unrelated
-  processes; on timeout or output overflow, it may stop only its own bounded
-  diagnostic child.
-- Every subprocess uses a trusted absolute executable path, an argument list,
-  `shell=False`, a trusted working directory, a sanitized environment, a
-  five-second timeout, and a one-MiB combined-output bound.
+  processes; on timeout or output overflow, it may stop only its owned Windows
+  diagnostic-child handle or newly created POSIX diagnostic group.
+- Every subprocess uses a validated absolute executable path, an argument
+  list, `shell=False`, a trusted working directory, a sanitized environment, a
+  five-second execution deadline, a 0.25-second cleanup grace, and a one-MiB
+  retained-output bound. Anonymous temporary capture means descendant-held
+  standard handles cannot extend the call.
+- Windows roots come from native Windows APIs, never inherited PATH or mutable
+  environment anchors. POSIX paths require a root-owned, non-group/other-
+  writable canonical ancestor chain and no detectable ACL/current-user write
+  grant. Privileged system-directory mutation remains outside the threat model.
 - Process summaries never include command lines, environment variables,
   usernames, file contents, tokens, or network destinations.
 - Hardware detection is not treated as proof that an application uses an
@@ -56,7 +62,7 @@ library, `unittest`, GitHub Actions, PowerShell/CIM, macOS system tools, Linux
 - `skills/resource-safe-execution/agents/openai.yaml`: optional Codex UI
   metadata that is not required by the portable workflow.
 - `skills/resource-safe-execution/scripts/resource_probe.py`: read-only
-  host-inspection CLI with an optional exclusive output-file write, plus
+  host-inspection CLI with an optional exclusive POSIX output-file write, plus
   importable parser/collector functions.
 - `skills/resource-safe-execution/references/*.md`: GPU, lifecycle, and
   operating-system guidance loaded only when relevant.
@@ -441,10 +447,11 @@ required_keys = {
 }
 ```
 
-Exercise `main()` with JSON to stdout, text to stdout, exclusive output-file
-success, rejection of existing and symlink destinations, invalid sampling exit
-code `2`, output-write failure exit code `1`, and unsupported-platform exit
-code `3` that explains the unsupported system without inventing metrics. No
+Exercise `main()` with JSON to stdout, text to stdout, POSIX exclusive
+output-file success, rejection of existing and symlink destinations, a
+concurrent parent-swap regression, and Windows fail-closed `--output`.
+Invalid sampling uses exit code `2`, output-write failure uses exit code `1`,
+and an unsupported platform uses exit code `3` without inventing metrics. No
 overwrite or force option exists in version `0.1.0`.
 
 - [ ] **Step 2: Verify RED**
@@ -469,21 +476,25 @@ class CommandResult:
     stderr: str
 
 def run_command(args: Sequence[str], timeout_seconds: float = 5.0) -> CommandResult:
-    child = subprocess.Popen(
-        list(args),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        cwd=trusted_working_directory,
-        env=sanitized_environment,
-        shell=False,
-    )
-    # Concurrent readers retain at most 1,048,576 combined bytes.
-    # Stop and wait for only this child on timeout or output overflow.
+    with TemporaryFile("w+b") as stdout, TemporaryFile("w+b") as stderr:
+        child = subprocess.Popen(
+            list(args),
+            stdout=stdout,
+            stderr=stderr,
+            cwd=trusted_working_directory,
+            env=sanitized_environment,
+            shell=False,
+        )
+        # Poll child identity and file sizes to one monotonic deadline.
+        # Cleanup is bounded by the deadline plus a 0.25-second grace.
 ```
 
 `run_command` rejects non-absolute executable paths. Resolve diagnostic tools
 only from explicit system-owned candidates; never consult the project
-directory or inherited `PATH`.
+directory or inherited `PATH`. Native Windows APIs supply validated roots and
+POSIX requires root-owned non-writable ancestors. This blocks unprivileged
+shadowing; it does not claim authenticity against privileged system-directory
+mutation.
 
 Represent every unavailable metric as:
 
@@ -594,11 +605,12 @@ Parse the probe with `ast` and reject imports whose root module is:
 {"requests", "httpx", "urllib", "socket", "ftplib", "smtplib"}
 ```
 
-Permit `Popen` and its owned child's `kill` method only inside `run_command`;
-reject calls named `kill`, `killpg`, `terminate`, or `send_signal` everywhere
-else, plus `os.system`, `subprocess.run`, shell execution, destructive command
-fragments, and package-manager commands. Require the timeout and combined
-output constants. Scan output serializers to ensure no keys named
+Permit `Popen`, its owned child's `kill` method, and POSIX `killpg` only inside
+`run_command`; reject `terminate` or `send_signal` everywhere and reject
+`kill`/`killpg` outside that function. Also reject `os.system`,
+`subprocess.run`, shell execution, destructive command fragments, and
+package-manager commands. Require timeout, cleanup-grace, and retained-output
+constants. Scan output serializers to ensure no keys named
 `command_line`, `cmdline`, `environment`, `username`, `token`, or
 `network_destination`.
 
@@ -642,13 +654,13 @@ Run:
 ```powershell
 python -m unittest tests.test_probe tests.test_safety -v
 python skills/resource-safe-execution/scripts/resource_probe.py --format text --sample-seconds 0.1 --include-processes
-python skills/resource-safe-execution/scripts/resource_probe.py --format json --sample-seconds 0.1 --output resource-snapshot.json
-python -m json.tool resource-snapshot.json > $null
-Remove-Item -LiteralPath resource-snapshot.json
+python skills/resource-safe-execution/scripts/resource_probe.py --format json --sample-seconds 0.1
 ```
 
 Expected: tests pass; text output contains CPU, memory, disk, GPU, and
-recommendation headings; JSON validates; no process command lines appear.
+recommendation headings; JSON validates; Windows rejects `--output` safely; no
+process command lines appear. Hosted POSIX tests exercise exclusive output and
+the concurrent parent-swap regression.
 
 - [ ] **Step 6: Commit platform and safety support**
 

@@ -16,3 +16,5 @@ Inspect the application's reported adapter and backend. For browsers, capture th
 ## Windows cautions
 
 Use a Job Object or retained process handle for child ownership when possible. Record process creation time as the start identity and compare it before cleanup because PIDs are reused. Avoid executable-name-wide termination and system-wide graphics settings. Restore any task-scoped renderer setting after the run.
+
+The bundled probe derives Windows and Program Files roots from native operating-system APIs, rejects reparse or current-token-writable trusted components, ignores inherited `PATH`, and passes only validated root variables to diagnostic children. This protects against unprivileged shadowing, not privileged replacement inside validated system directories. Windows v0.1 rejects `--output`; redirect or capture stdout in a directory whose ownership you have already established.

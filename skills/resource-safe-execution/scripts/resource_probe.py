@@ -11,11 +11,12 @@ import math
 import os
 import platform
 import re
+import signal
 import shutil
 import stat
 import subprocess
 import sys
-import threading
+import tempfile
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -29,12 +30,12 @@ MIN_SAMPLE_SECONDS = 0.1
 MAX_SAMPLE_SECONDS = 10.0
 MAX_COMMAND_TIMEOUT_SECONDS = 5.0
 MAX_COMMAND_OUTPUT_BYTES = 1_048_576
+COMMAND_CLEANUP_GRACE_SECONDS = 0.25
 SUPPORTED_PLATFORMS = {"Linux", "Darwin", "Windows"}
 POSIX_TRUSTED_DIRECTORIES = (
     Path("/bin"),
     Path("/usr/bin"),
     Path("/usr/sbin"),
-    Path("/usr/local/bin"),
 )
 TRUSTED_TOOL_NAMES = {
     "nvidia-smi",
@@ -73,38 +74,251 @@ class CommandStartError(RuntimeError):
     """The diagnostic child could not be started without exposing its path."""
 
 
-def _is_relative_to(path: Path, root: Path) -> bool:
+def _windows_native_directory(api_name: str) -> Path:
+    """Read a Windows directory from the operating system, never the environment."""
+    if platform.system() != "Windows":
+        raise OSError("Windows directory APIs are unavailable")
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    api = getattr(kernel32, api_name)
+    api.argtypes = (ctypes.c_wchar_p, ctypes.c_uint32)
+    api.restype = ctypes.c_uint32
+    capacity = 32_768
+    buffer = ctypes.create_unicode_buffer(capacity)
+    length = int(api(buffer, capacity))
+    if length == 0:
+        raise ctypes.WinError(ctypes.get_last_error())
+    if length >= capacity:
+        raise OSError(f"{api_name} returned an oversized path")
+    return Path(buffer.value).absolute()
+
+
+def _windows_directory() -> Path:
+    return _windows_native_directory("GetWindowsDirectoryW")
+
+
+def _windows_system_directory() -> Path:
+    return _windows_native_directory("GetSystemDirectoryW")
+
+
+def _windows_program_files_directory() -> Path:
+    """Read Program Files through the Windows known-folder API."""
+    if platform.system() != "Windows":
+        raise OSError("Windows known-folder APIs are unavailable")
+    shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+    get_folder = shell32.SHGetFolderPathW
+    get_folder.argtypes = (
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_wchar_p,
+    )
+    get_folder.restype = ctypes.c_long
+    buffer = ctypes.create_unicode_buffer(32_768)
+    csidl_program_files = 0x0026
+    result = int(
+        get_folder(
+            None,
+            csidl_program_files,
+            None,
+            0,
+            buffer,
+        )
+    )
+    if result < 0 or not buffer.value:
+        raise OSError("Program Files known-folder lookup failed")
+    return Path(buffer.value).absolute()
+
+
+def _windows_is_reparse_point(path: Path) -> bool:
+    metadata = os.lstat(path)
+    attributes = int(getattr(metadata, "st_file_attributes", 0))
+    reparse_attribute = int(
+        getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400)
+    )
+    return bool(attributes & reparse_attribute)
+
+
+def _windows_current_user_can_write(path: Path, *, directory: bool) -> bool:
+    """Use the current Windows token to test dangerous write rights, without writing."""
+    if platform.system() != "Windows":
+        raise OSError("Windows access checks are unavailable")
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = (
+        ctypes.c_wchar_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+    )
+    create_file.restype = ctypes.c_void_p
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = (ctypes.c_void_p,)
+    close_handle.restype = ctypes.c_int
+
+    file_share_all = 0x00000001 | 0x00000002 | 0x00000004
+    open_existing = 3
+    open_reparse_point = 0x00200000
+    backup_semantics = 0x02000000 if directory else 0
+    invalid_handle = ctypes.c_void_p(-1).value
+    if directory:
+        dangerous_rights = (
+            0x00000002,  # FILE_ADD_FILE
+            0x00000004,  # FILE_ADD_SUBDIRECTORY
+            0x00000040,  # FILE_DELETE_CHILD
+            0x00010000,  # DELETE
+            0x00040000,  # WRITE_DAC
+            0x00080000,  # WRITE_OWNER
+        )
+    else:
+        dangerous_rights = (
+            0x00000002,  # FILE_WRITE_DATA
+            0x00000004,  # FILE_APPEND_DATA
+            0x00000100,  # FILE_WRITE_ATTRIBUTES
+            0x00010000,  # DELETE
+            0x00040000,  # WRITE_DAC
+            0x00080000,  # WRITE_OWNER
+        )
+
+    for desired_access in dangerous_rights:
+        handle = create_file(
+            str(path),
+            desired_access,
+            file_share_all,
+            None,
+            open_existing,
+            backup_semantics | open_reparse_point,
+            None,
+        )
+        if handle not in (None, invalid_handle):
+            close_handle(handle)
+            return True
+    return False
+
+
+def _windows_path_is_secure(
+    candidate: Path,
+    trusted_root: Path,
+    *,
+    expect_file: bool = True,
+) -> bool:
+    """Reject reparse points and current-token-writable trusted components."""
     try:
-        path.relative_to(root)
-    except ValueError:
+        absolute_candidate = candidate.absolute()
+        absolute_root = trusted_root.absolute()
+        relative = absolute_candidate.relative_to(absolute_root)
+    except (OSError, ValueError):
         return False
+
+    components = [absolute_root]
+    current = absolute_root
+    for part in relative.parts:
+        current = current / part
+        components.append(current)
+
+    for index, component in enumerate(components):
+        final = index == len(components) - 1
+        component_is_directory = not final or not expect_file
+        try:
+            if _windows_is_reparse_point(component):
+                return False
+            if component_is_directory:
+                if not component.is_dir():
+                    return False
+            elif not component.is_file():
+                return False
+            if _windows_current_user_can_write(
+                component,
+                directory=component_is_directory,
+            ):
+                return False
+        except OSError:
+            return False
     return True
 
 
-def _current_user_can_write(path: Path) -> bool:
-    metadata = path.stat()
-    mode = stat.S_IMODE(metadata.st_mode)
-    if mode & stat.S_IWOTH:
+def _posix_metadata_is_secure(
+    metadata: object,
+    *,
+    require_directory: bool,
+) -> bool:
+    mode = int(getattr(metadata, "st_mode", 0))
+    if int(getattr(metadata, "st_uid", -1)) != 0:
+        return False
+    if mode & (stat.S_IWGRP | stat.S_IWOTH):
+        return False
+    if require_directory:
+        return stat.S_ISDIR(mode)
+    return stat.S_ISREG(mode) and bool(
+        mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    )
+
+
+def _posix_has_extended_acl(path: Path) -> bool:
+    list_xattrs = getattr(os, "listxattr", None)
+    if list_xattrs is None:
+        return False
+    try:
+        names = list_xattrs(path, follow_symlinks=False)
+    except (NotImplementedError, OSError, TypeError):
+        return False
+    acl_names = {
+        "system.posix_acl_access",
+        "system.posix_acl_default",
+        "com.apple.system.Security",
+    }
+    return any(
+        str(name) in acl_names or "acl" in str(name).lower()
+        for name in names
+    )
+
+
+def _posix_current_user_can_write(path: Path) -> bool:
+    """Detect mode- or ACL-granted write access for an unprivileged caller."""
+    if _posix_has_extended_acl(path):
         return True
     getuid = getattr(os, "geteuid", None)
-    getgroups = getattr(os, "getgroups", None)
-    getgid = getattr(os, "getegid", None)
-    if getuid is None:
-        return bool(mode & (stat.S_IWUSR | stat.S_IWGRP))
-    user_id = getuid()
-    if user_id == 0:
-        return bool(mode & (stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
-    if metadata.st_uid == user_id and mode & stat.S_IWUSR:
-        return True
-    group_ids = set(getgroups() if getgroups is not None else ())
-    if getgid is not None:
-        group_ids.add(getgid())
-    return metadata.st_gid in group_ids and bool(mode & stat.S_IWGRP)
-
-
-def _regular_non_symlink(path: Path) -> bool:
+    if getuid is None or getuid() == 0:
+        return False
     try:
-        return path.is_file() and not path.is_symlink()
+        return bool(os.access(path, os.W_OK, effective_ids=True))
+    except (NotImplementedError, TypeError):
+        return bool(os.access(path, os.W_OK))
+
+
+def _posix_candidate_is_secure(
+    candidate: Path,
+    trusted_root: Path,
+) -> bool:
+    try:
+        absolute_candidate = candidate.resolve(strict=True)
+        absolute_root = trusted_root.resolve(strict=True)
+        absolute_candidate.relative_to(absolute_root)
+    except (OSError, ValueError):
+        return False
+    try:
+        if candidate.is_symlink():
+            return False
+        parents = list(reversed(absolute_candidate.parents))
+        for parent in parents:
+            if not _posix_metadata_is_secure(
+                parent.stat(),
+                require_directory=True,
+            ):
+                return False
+            if _posix_current_user_can_write(parent):
+                return False
+        if not _posix_metadata_is_secure(
+            absolute_candidate.stat(),
+            require_directory=False,
+        ):
+            return False
+        if _posix_current_user_can_write(absolute_candidate):
+            return False
+        return os.access(absolute_candidate, os.X_OK)
     except OSError:
         return False
 
@@ -127,52 +341,48 @@ def resolve_trusted_executable(
         )
 
     if selected_system == "Windows":
-        system_root_text = os.environ.get("SystemRoot") or os.environ.get("WINDIR")
-        program_files_text = os.environ.get("ProgramFiles")
         candidates: list[tuple[Path, Path]] = []
-        if system_root_text:
-            system_root = Path(system_root_text).expanduser()
+        try:
+            windows_directory = _windows_directory()
+            system_directory = _windows_system_directory()
             if normalized == "powershell.exe":
                 candidates.append(
                     (
-                        system_root
-                        / "System32"
+                        system_directory
                         / "WindowsPowerShell"
                         / "v1.0"
                         / "powershell.exe",
-                        system_root,
+                        windows_directory,
                     )
                 )
             elif normalized == "nvidia-smi":
                 candidates.append(
                     (
-                        system_root / "System32" / "nvidia-smi.exe",
-                        system_root,
+                        system_directory / "nvidia-smi.exe",
+                        windows_directory,
                     )
                 )
-        if program_files_text and normalized == "nvidia-smi":
-            program_files = Path(program_files_text).expanduser()
-            candidates.append(
-                (
-                    program_files
-                    / "NVIDIA Corporation"
-                    / "NVSMI"
-                    / "nvidia-smi.exe",
-                    program_files,
+        except OSError:
+            pass
+        if normalized == "nvidia-smi":
+            try:
+                program_files = _windows_program_files_directory()
+            except OSError:
+                pass
+            else:
+                candidates.append(
+                    (
+                        program_files
+                        / "NVIDIA Corporation"
+                        / "NVSMI"
+                        / "nvidia-smi.exe",
+                        program_files,
+                    )
                 )
-            )
 
         for candidate, trusted_root in candidates:
-            try:
-                absolute_candidate = candidate.absolute()
-                absolute_root = trusted_root.absolute()
-            except OSError:
-                continue
-            if (
-                _is_relative_to(absolute_candidate, absolute_root)
-                and _regular_non_symlink(absolute_candidate)
-            ):
-                return absolute_candidate
+            if _windows_path_is_secure(candidate, trusted_root):
+                return candidate.absolute()
         raise FileNotFoundError(
             f"no trusted executable candidate for {name}"
         )
@@ -186,32 +396,50 @@ def resolve_trusted_executable(
             except OSError:
                 continue
             if (
-                _is_relative_to(absolute_candidate, absolute_root)
-                and _regular_non_symlink(candidate)
-                and os.access(candidate, os.X_OK)
-                and not _current_user_can_write(candidate)
+                not candidate.is_symlink()
+                and _posix_candidate_is_secure(candidate, absolute_root)
             ):
-                return candidate
+                return absolute_candidate
     raise FileNotFoundError(f"no trusted executable candidate for {name}")
 
 
 def _trusted_working_directory() -> Path:
     if platform.system() == "Windows":
-        root_text = os.environ.get("SystemRoot") or os.environ.get("WINDIR")
-        if root_text:
-            system32 = Path(root_text) / "System32"
-            if system32.is_dir() and not system32.is_symlink():
-                return system32.absolute()
+        windows_directory = _windows_directory()
+        system_directory = _windows_system_directory()
+        if _windows_path_is_secure(
+            system_directory,
+            windows_directory,
+            expect_file=False,
+        ):
+            return system_directory
+        raise OSError("trusted Windows working directory is unavailable")
     return Path(os.path.abspath(os.sep))
 
 
 def _sanitized_environment() -> dict[str, str]:
     environment: dict[str, str] = {}
     if platform.system() == "Windows":
-        root_text = os.environ.get("SystemRoot") or os.environ.get("WINDIR")
-        if root_text:
-            environment["SystemRoot"] = root_text
-            environment["WINDIR"] = root_text
+        windows_directory = _windows_directory()
+        if not _windows_path_is_secure(
+            windows_directory,
+            windows_directory,
+            expect_file=False,
+        ):
+            raise OSError("trusted Windows directory is unavailable")
+        environment["SystemRoot"] = str(windows_directory)
+        environment["WINDIR"] = str(windows_directory)
+        try:
+            program_files = _windows_program_files_directory()
+        except OSError:
+            pass
+        else:
+            if _windows_path_is_secure(
+                program_files,
+                program_files,
+                expect_file=False,
+            ):
+                environment["ProgramFiles"] = str(program_files)
     else:
         environment["LANG"] = "C"
         environment["LC_ALL"] = "C"
@@ -239,95 +467,121 @@ def run_command(
     if not command or not Path(command[0]).is_absolute():
         raise ValueError("command must start with an absolute executable path")
 
-    try:
-        process = subprocess.Popen(
-            command,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            cwd=os.fspath(_trusted_working_directory()),
-            env=_sanitized_environment(),
-            shell=False,
-            bufsize=0,
+    started = time.monotonic()
+    deadline = started + validated_timeout
+    selected_system = platform.system()
+    with (
+        tempfile.TemporaryFile(mode="w+b") as stdout_capture,
+        tempfile.TemporaryFile(mode="w+b") as stderr_capture,
+    ):
+        popen_options: dict[str, object] = {}
+        if selected_system in {"Linux", "Darwin"}:
+            popen_options["start_new_session"] = True
+        elif selected_system == "Windows":
+            popen_options["creationflags"] = int(
+                getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            )
+        try:
+            process = subprocess.Popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=stdout_capture,
+                stderr=stderr_capture,
+                cwd=os.fspath(_trusted_working_directory()),
+                env=_sanitized_environment(),
+                shell=False,
+                **popen_options,
+            )
+        except PermissionError:
+            raise CommandStartError(
+                "diagnostic child permission denied"
+            ) from None
+        except OSError:
+            raise CommandStartError(
+                "diagnostic child could not be started"
+            ) from None
+
+        breach: str | None = None
+        returncode: int | None = None
+        while True:
+            captured_size = (
+                os.fstat(stdout_capture.fileno()).st_size
+                + os.fstat(stderr_capture.fileno()).st_size
+            )
+            if captured_size > MAX_COMMAND_OUTPUT_BYTES:
+                breach = "overflow"
+                break
+            returncode = process.poll()
+            if returncode is not None:
+                break
+            remaining_seconds = deadline - time.monotonic()
+            if remaining_seconds <= 0:
+                breach = "timeout"
+                break
+            time.sleep(min(0.01, remaining_seconds))
+
+        if breach is not None and process.poll() is None:
+            if selected_system in {"Linux", "Darwin"} and hasattr(
+                process,
+                "pid",
+            ):
+                try:
+                    os.killpg(int(process.pid), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                except OSError:
+                    if process.poll() is None:
+                        process.kill()
+            else:
+                process.kill()
+
+            cleanup_deadline = deadline + COMMAND_CLEANUP_GRACE_SECONDS
+            cleanup_remaining = max(
+                0.0,
+                cleanup_deadline - time.monotonic(),
+            )
+            try:
+                returncode = process.wait(timeout=cleanup_remaining)
+            except subprocess.TimeoutExpired:
+                returncode = process.poll()
+
+        stdout_size = os.fstat(stdout_capture.fileno()).st_size
+        stderr_size = os.fstat(stderr_capture.fileno()).st_size
+        captured_bytes = min(
+            MAX_COMMAND_OUTPUT_BYTES,
+            stdout_size + stderr_size,
         )
-    except PermissionError:
-        raise CommandStartError(
-            "diagnostic child permission denied"
-        ) from None
-    except OSError:
-        raise CommandStartError(
-            "diagnostic child could not be started"
-        ) from None
-    assert process.stdout is not None
-    assert process.stderr is not None
-
-    buffers = (bytearray(), bytearray())
-    capture_lock = threading.Lock()
-    overflow = threading.Event()
-    captured_bytes = 0
-
-    def read_bounded(stream: object, output: bytearray) -> None:
-        nonlocal captured_bytes
-        while not overflow.is_set():
-            chunk = stream.read(65_536)
-            if not chunk:
-                return
-            with capture_lock:
-                remaining = MAX_COMMAND_OUTPUT_BYTES - captured_bytes
-                accepted = min(len(chunk), max(0, remaining))
-                if accepted:
-                    output.extend(chunk[:accepted])
-                    captured_bytes += accepted
-                if accepted < len(chunk):
-                    overflow.set()
-                    return
-
-    readers = (
-        threading.Thread(
-            target=read_bounded,
-            args=(process.stdout, buffers[0]),
-            daemon=True,
-        ),
-        threading.Thread(
-            target=read_bounded,
-            args=(process.stderr, buffers[1]),
-            daemon=True,
-        ),
-    )
-    for reader in readers:
-        reader.start()
-
-    deadline = time.monotonic() + validated_timeout
-    breach: str | None = None
-    while process.poll() is None:
-        if overflow.is_set():
-            breach = "overflow"
-            break
-        remaining_seconds = deadline - time.monotonic()
-        if remaining_seconds <= 0:
-            breach = "timeout"
-            break
-        overflow.wait(min(0.01, remaining_seconds))
-
-    if breach is not None and process.poll() is None:
-        process.kill()
-    returncode = process.wait()
-    for reader in readers:
-        reader.join()
-    process.stdout.close()
-    process.stderr.close()
-
-    if overflow.is_set():
-        raise CommandOutputLimitError(captured_bytes)
-    if breach == "timeout":
-        raise CommandTimeoutError(
-            f"diagnostic child timed out after {validated_timeout:g} seconds"
+        stdout_capture.seek(0)
+        stdout_bytes = stdout_capture.read(
+            min(stdout_size, MAX_COMMAND_OUTPUT_BYTES)
         )
-    return CommandResult(
-        returncode,
-        bytes(buffers[0]).decode("utf-8", errors="replace"),
-        bytes(buffers[1]).decode("utf-8", errors="replace"),
-    )
+        remaining_bytes = MAX_COMMAND_OUTPUT_BYTES - len(stdout_bytes)
+        stderr_capture.seek(0)
+        stderr_bytes = stderr_capture.read(
+            min(stderr_size, remaining_bytes)
+        )
+
+        if breach == "overflow" or (
+            stdout_size + stderr_size > MAX_COMMAND_OUTPUT_BYTES
+        ):
+            raise CommandOutputLimitError(captured_bytes)
+        if breach == "timeout":
+            raise CommandTimeoutError(
+                f"diagnostic child timed out after "
+                f"{validated_timeout:g} seconds"
+            )
+        if returncode is None:
+            returncode = process.poll()
+        if returncode is None:
+            raise CommandTimeoutError(
+                f"diagnostic child exceeded its "
+                f"{validated_timeout:g}-second execution deadline"
+            )
+        return CommandResult(
+            int(returncode),
+            stdout_bytes.decode("utf-8", errors="replace"),
+            stderr_bytes.decode("utf-8", errors="replace"),
+        )
 
 
 def parse_linux_cpu_stat(text: str) -> tuple[int, int]:
@@ -1372,30 +1626,81 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _write_output_exclusive(path_text: str, content: str) -> None:
-    destination = Path(path_text).expanduser().absolute()
-    if destination.is_symlink():
-        raise FileExistsError("output destination is a symlink")
-    if destination.exists():
-        raise FileExistsError("output destination already exists")
+def _write_output_exclusive(
+    path_text: str | os.PathLike[str],
+    content: str,
+) -> None:
+    if platform.system() == "Windows":
+        raise OSError(
+            "secure output files are unavailable on Windows v0.1; use stdout"
+        )
+    if os.name != "posix" or os.open not in os.supports_dir_fd:
+        raise OSError(
+            "secure output files require POSIX dir_fd support; use stdout"
+        )
 
-    parent = destination.parent
-    current = parent
-    while True:
-        if current.is_symlink():
-            raise OSError("output parent path contains a symlink")
-        if current == current.parent:
-            break
-        current = current.parent
-    if not parent.is_dir():
-        raise OSError("output parent is not an existing regular directory")
+    expanded = os.path.expanduser(os.fspath(path_text))
+    destination = Path(os.path.abspath(expanded))
+    if destination.name in {"", ".", ".."}:
+        raise OSError("output destination must name a new regular file")
 
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-    if hasattr(os, "O_BINARY"):
-        flags |= os.O_BINARY
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    descriptor = os.open(destination, flags, 0o600)
+    required_flags = ("O_DIRECTORY", "O_NOFOLLOW")
+    if any(not hasattr(os, name) for name in required_flags):
+        raise OSError(
+            "secure output files require no-follow directory traversal; use stdout"
+        )
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    if hasattr(os, "O_CLOEXEC"):
+        directory_flags |= os.O_CLOEXEC
+
+    current_descriptor = os.open(os.path.abspath(os.sep), directory_flags)
+    try:
+        parent_parts = destination.parent.parts
+        for part in parent_parts:
+            if part in {"", os.path.abspath(os.sep)}:
+                continue
+            try:
+                next_descriptor = os.open(
+                    part,
+                    directory_flags,
+                    dir_fd=current_descriptor,
+                )
+            except OSError:
+                raise OSError(
+                    "output parent is missing, not a directory, or a symlink"
+                ) from None
+            os.close(current_descriptor)
+            current_descriptor = next_descriptor
+            if not stat.S_ISDIR(os.fstat(current_descriptor).st_mode):
+                raise OSError("output parent is not a regular directory")
+
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+        if hasattr(os, "O_CLOEXEC"):
+            flags |= os.O_CLOEXEC
+        try:
+            descriptor = os.open(
+                destination.name,
+                flags,
+                0o600,
+                dir_fd=current_descriptor,
+            )
+        except FileExistsError:
+            try:
+                destination_is_symlink = stat.S_ISLNK(
+                    os.lstat(destination).st_mode
+                )
+            except OSError:
+                destination_is_symlink = False
+            if destination_is_symlink:
+                raise FileExistsError(
+                    "output destination is a symlink"
+                ) from None
+            raise FileExistsError(
+                "output destination already exists"
+            ) from None
+    finally:
+        os.close(current_descriptor)
+
     with os.fdopen(
         descriptor,
         "w",

@@ -8,7 +8,7 @@ PROBE_PATH = (
     REPO_ROOT / "skills" / "resource-safe-execution" / "scripts" / "resource_probe.py"
 )
 FORBIDDEN_IMPORTS = {"requests", "httpx", "urllib", "socket", "ftplib", "smtplib"}
-FORBIDDEN_CALLS = {"killpg", "terminate", "send_signal"}
+FORBIDDEN_CALLS = {"terminate", "send_signal"}
 SENSITIVE_OUTPUT_KEYS = {
     "command_line",
     "cmdline",
@@ -94,7 +94,10 @@ class StaticSafetyTests(unittest.TestCase):
             name = call_name(node)
             if name in FORBIDDEN_CALLS:
                 violations.append(name)
-            if name in {"Popen", "kill"} and self.enclosing_function(node) != "run_command":
+            if (
+                name in {"Popen", "kill", "killpg"}
+                and self.enclosing_function(node) != "run_command"
+            ):
                 violations.append(
                     f"{name} outside run_command"
                 )
@@ -156,6 +159,26 @@ class StaticSafetyTests(unittest.TestCase):
             if isinstance(key, ast.Constant) and isinstance(key.value, str)
         }
         self.assertEqual(set(), output_keys & SENSITIVE_OUTPUT_KEYS)
+
+    def test_windows_trust_anchors_are_not_read_from_environment(self) -> None:
+        forbidden = (
+            'os.environ.get("SystemRoot")',
+            'os.environ.get("WINDIR")',
+            'os.environ.get("ProgramFiles")',
+            'os.getenv("SystemRoot")',
+            'os.getenv("WINDIR")',
+            'os.getenv("ProgramFiles")',
+        )
+        for fragment in forbidden:
+            with self.subTest(fragment=fragment):
+                self.assertNotIn(fragment, self.source)
+
+    def test_owned_process_identity_and_cleanup_ceiling_are_explicit(self) -> None:
+        self.assertIn("start_new_session", self.source)
+        self.assertIn("CREATE_NEW_PROCESS_GROUP", self.source)
+        self.assertIn("os.killpg", self.source)
+        self.assertIn("COMMAND_CLEANUP_GRACE_SECONDS", self.source)
+        self.assertNotIn("reader.join", self.source)
 
 
 if __name__ == "__main__":

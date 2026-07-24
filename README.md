@@ -11,20 +11,35 @@ monitoring work, and cleaning up only processes it started.
 
 The canonical [Agent Skill](skills/resource-safe-execution) combines portable
 policy with a Python 3.10+ probe for read-only host inspection of CPU, memory,
-disk, GPU visibility, and privacy-preserving process summaries. Its only
-optional write is an explicitly requested output file. Platform-specific
+disk, GPU visibility, and privacy-preserving process summaries. On POSIX, its
+only optional write is an explicitly requested output file. Windows v0.1
+requires stdout because the standard library cannot create a file relative to
+a held directory handle without an ancestor path race. Platform-specific
 guidance is loaded from direct local links in the skill folder.
 
 ## Safety guarantees
 
 The bundled runtime uses only the Python standard library. It performs no
 network access, telemetry, package installation, or privilege escalation. It
-never terminates pre-existing or unrelated processes. It may stop only its own
-diagnostic child when the five-second timeout or one-MiB combined-output bound
-overflows. Process summaries exclude command lines, environment variables,
-usernames, file contents, tokens, and network destinations. Detection of GPU
-hardware is not presented as proof that an application uses a particular
-acceleration backend.
+never terminates pre-existing or unrelated processes. Diagnostic calls have a
+five-second execution deadline plus a fixed 0.25-second cleanup grace. Output
+is captured in anonymous temporary files, so descendant-held standard handles
+cannot extend the call; at most one MiB is retained. A timeout or output
+overflow is a breach. Windows then stops only the child through its owned
+process handle, while POSIX stops the new owned process group.
+
+Diagnostic executables never come from the project directory or inherited
+PATH. Native Windows APIs provide the Windows and Program Files anchors; the
+probe rejects reparse or current-token-writable trusted components and passes
+only validated SystemRoot, WINDIR, and ProgramFiles variables. POSIX candidates
+must be root-owned, executable, and beneath a root-owned ancestor chain that is
+not group/other-writable or exposed through a detectable ACL. Privileged
+system-directory mutation is outside this unprivileged-shadowing boundary.
+
+Process summaries exclude command lines, environment variables, usernames,
+file contents, tokens, and network destinations. Detection of GPU hardware is
+not presented as proof that an application uses a particular acceleration
+backend.
 
 ## Install
 
@@ -94,10 +109,13 @@ claim is made.
 python skills/resource-safe-execution/scripts/resource_probe.py --format json
 ```
 
-The probe prints one JSON document. `--output NEW_FILE` performs an optional
-output-file write and creates the destination exclusively; it refuses existing
-files, symlinks, and invalid parent paths. Missing host metrics degrade
-individually with a machine-readable reason.
+The probe prints one JSON document. On macOS and Linux,
+`--output NEW_FILE` performs an optional output-file write using POSIX
+directory-handle-relative, no-follow traversal and exclusive creation. It
+refuses existing files, symlinks, and invalid parent paths even if an ancestor
+is swapped concurrently. Windows v0.1 requires stdout and rejects `--output`
+with exit code `1`. Missing host metrics degrade individually with a
+machine-readable reason.
 
 ## Validate
 
