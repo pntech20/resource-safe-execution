@@ -4,6 +4,7 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .venv/
+.worktrees/
 coverage.xml
 dist/
 resource-snapshot*.json
