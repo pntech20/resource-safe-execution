@@ -55,6 +55,11 @@ TRUSTED_TOOL_NAMES = {
     "system_profiler",
     "vm_stat",
 }
+_RUNTIME_KERNEL = os.name
+_POSIX_DIR_FD_OPEN_SUPPORTED = (
+    _RUNTIME_KERNEL == "posix"
+    and os.open in getattr(os, "supports_dir_fd", ())
+)
 
 
 @dataclass(frozen=True)
@@ -540,8 +545,8 @@ def _sanitized_environment() -> dict[str, str]:
     return environment
 
 
-def _configure_pipe_reader(stream: BinaryIO, selected_system: str) -> None:
-    if selected_system not in {"Linux", "Darwin"}:
+def _configure_pipe_reader(stream: BinaryIO, runtime_kernel: str) -> None:
+    if runtime_kernel != "posix":
         return
     import fcntl
 
@@ -589,11 +594,11 @@ def _windows_pipe_available(stream: BinaryIO) -> int:
 
 def _read_available_pipe(
     stream: BinaryIO,
-    selected_system: str,
+    runtime_kernel: str,
     maximum_bytes: int,
 ) -> bytes:
     descriptor = stream.fileno()
-    if selected_system == "Windows":
+    if runtime_kernel == "nt":
         available = _windows_pipe_available(stream)
         if available == 0:
             return b""
@@ -611,7 +616,7 @@ def _read_available_pipe(
 def _drain_available_output(
     process: subprocess.Popen[bytes],
     capture: _BoundedOutput,
-    selected_system: str,
+    runtime_kernel: str,
 ) -> None:
     streams = (
         ("stdout", process.stdout),
@@ -623,7 +628,7 @@ def _drain_available_output(
         while not capture.overflowed:
             data = _read_available_pipe(
                 stream,
-                selected_system,
+                runtime_kernel,
                 capture.next_read_size,
             )
             if not data:
@@ -654,11 +659,11 @@ def run_command(
 
     started = time.monotonic()
     deadline = started + validated_timeout
-    selected_system = platform.system()
+    runtime_kernel = _RUNTIME_KERNEL
     popen_options: dict[str, object] = {}
-    if selected_system in {"Linux", "Darwin"}:
+    if runtime_kernel == "posix":
         popen_options["start_new_session"] = True
-    elif selected_system == "Windows":
+    elif runtime_kernel == "nt":
         popen_options["creationflags"] = int(
             getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
         )
@@ -695,13 +700,13 @@ def run_command(
         try:
             if process.stdout is None or process.stderr is None:
                 raise OSError("diagnostic pipe is unavailable")
-            _configure_pipe_reader(process.stdout, selected_system)
-            _configure_pipe_reader(process.stderr, selected_system)
+            _configure_pipe_reader(process.stdout, runtime_kernel)
+            _configure_pipe_reader(process.stderr, runtime_kernel)
             while True:
                 _drain_available_output(
                     process,
                     capture,
-                    selected_system,
+                    runtime_kernel,
                 )
                 if capture.overflowed:
                     breach = "overflow"
@@ -711,7 +716,7 @@ def run_command(
                     _drain_available_output(
                         process,
                         capture,
-                        selected_system,
+                        runtime_kernel,
                     )
                     if capture.overflowed:
                         breach = "overflow"
@@ -725,7 +730,7 @@ def run_command(
             breach = "capture"
 
         if breach is not None and process.poll() is None:
-            if selected_system in {"Linux", "Darwin"} and hasattr(
+            if runtime_kernel == "posix" and hasattr(
                 process,
                 "pid",
             ):
@@ -1849,7 +1854,7 @@ def _write_output_exclusive(
         raise OSError(
             "secure output files are unavailable on Windows v0.1; use stdout"
         )
-    if os.name != "posix" or os.open not in os.supports_dir_fd:
+    if not _POSIX_DIR_FD_OPEN_SUPPORTED:
         raise OSError(
             "secure output files require POSIX dir_fd support; use stdout"
         )

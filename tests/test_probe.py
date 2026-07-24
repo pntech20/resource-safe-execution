@@ -713,6 +713,52 @@ class CommandTests(unittest.TestCase):
         self.assertEqual("resource probe ✓", result.stdout.strip())
         self.assertEqual("", result.stderr)
 
+    def test_command_mechanics_use_runtime_kernel_not_collector_platform(
+        self,
+    ) -> None:
+        mocked_collector_systems = (
+            ("Linux", "Darwin")
+            if os.name == "nt"
+            else ("Windows",)
+        )
+        for mocked_collector_system in mocked_collector_systems:
+            child = self.FakeProcess(stdout=b"ok")
+            with (
+                self.subTest(
+                    mocked_collector_system=mocked_collector_system,
+                ),
+                mock.patch.object(
+                    probe.platform,
+                    "system",
+                    return_value=mocked_collector_system,
+                ),
+                mock.patch.object(
+                    probe.subprocess,
+                    "Popen",
+                    return_value=child,
+                ) as popen,
+                mock.patch.object(
+                    probe,
+                    "_trusted_working_directory",
+                    return_value=Path(os.path.abspath(os.sep)),
+                ),
+                mock.patch.object(
+                    probe,
+                    "_sanitized_environment",
+                    return_value={},
+                ),
+            ):
+                result = probe.run_command([sys.executable, "-V"])
+
+            self.assertEqual("ok", result.stdout)
+            options = popen.call_args.kwargs
+            if os.name == "nt":
+                self.assertIn("creationflags", options)
+                self.assertNotIn("start_new_session", options)
+            else:
+                self.assertTrue(options["start_new_session"])
+                self.assertNotIn("creationflags", options)
+
     def test_run_command_uses_trusted_cwd_and_sanitized_environment(self) -> None:
         child = self.FakeProcess()
         sinks: list[object] = []
@@ -2020,7 +2066,7 @@ class CliTests(unittest.TestCase):
     )
     def test_output_file_success_does_not_duplicate_to_stdout(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            output = Path(temp_dir) / "snapshot.json"
+            output = Path(temp_dir).resolve(strict=True) / "snapshot.json"
             with mock.patch.object(
                 probe, "collect_snapshot", return_value=sample_snapshot()
             ):
@@ -2038,7 +2084,7 @@ class CliTests(unittest.TestCase):
     )
     def test_existing_output_file_is_rejected_without_overwrite(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            output = Path(temp_dir) / "snapshot.json"
+            output = Path(temp_dir).resolve(strict=True) / "snapshot.json"
             output.write_text("keep me", encoding="utf-8")
             with mock.patch.object(
                 probe, "collect_snapshot", return_value=sample_snapshot()
@@ -2058,7 +2104,7 @@ class CliTests(unittest.TestCase):
     )
     def test_symlink_output_file_is_rejected_without_following(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            directory = Path(temp_dir)
+            directory = Path(temp_dir).resolve(strict=True)
             target = directory / "target.json"
             target.write_text("keep target", encoding="utf-8")
             output = directory / "snapshot.json"
@@ -2092,6 +2138,26 @@ class CliTests(unittest.TestCase):
             self.assertEqual("", stdout)
             self.assertIn("symlink", stderr)
             self.assertEqual("keep target", target.read_text(encoding="utf-8"))
+
+    @unittest.skipIf(
+        os.name == "nt",
+        "Windows v0.1 output files fail closed; use stdout",
+    )
+    def test_symlinked_posix_output_parent_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve(strict=True)
+            target = root / "target"
+            target.mkdir()
+            parent = root / "parent"
+            parent.symlink_to(target, target_is_directory=True)
+
+            with self.assertRaisesRegex(OSError, "parent"):
+                probe._write_output_exclusive(
+                    parent / "snapshot.json",
+                    "{}\n",
+                )
+
+            self.assertFalse((target / "snapshot.json").exists())
 
     def test_windows_output_file_write_fails_closed_to_stdout(self) -> None:
         with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
@@ -2145,7 +2211,7 @@ class CliTests(unittest.TestCase):
     )
     def test_parent_swap_cannot_redirect_posix_output(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             original_parent = root / "safe"
             original_parent.mkdir()
             moved_parent = root / "safe-held"
@@ -2179,6 +2245,19 @@ class CliTests(unittest.TestCase):
             self.assertEqual("{}\n", (moved_parent / destination.name).read_text())
             self.assertFalse((attacker_parent / destination.name).exists())
 
+    def test_posix_dir_fd_capability_is_immutable_when_open_is_wrapped(
+        self,
+    ) -> None:
+        expected = (
+            os.name == "posix"
+            and probe.os.open in probe.os.supports_dir_fd
+        )
+        with mock.patch.object(probe.os, "open", wraps=probe.os.open):
+            self.assertEqual(
+                expected,
+                probe._POSIX_DIR_FD_OPEN_SUPPORTED,
+            )
+
     def test_invalid_sampling_returns_exit_code_two(self) -> None:
         result, stdout, stderr = self.run_main(["--sample-seconds", "0"])
         self.assertEqual(2, result)
@@ -2191,7 +2270,11 @@ class CliTests(unittest.TestCase):
     )
     def test_unwritable_output_returns_exit_code_one(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            output = Path(temp_dir) / "missing-parent" / "snapshot.json"
+            output = (
+                Path(temp_dir).resolve(strict=True)
+                / "missing-parent"
+                / "snapshot.json"
+            )
             with mock.patch.object(
                 probe, "collect_snapshot", return_value=sample_snapshot()
             ):
