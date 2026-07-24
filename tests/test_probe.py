@@ -1,10 +1,13 @@
 import contextlib
 import importlib.util
+import inspect
 import io
 import json
+import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -212,11 +215,27 @@ class PlatformCollectorTests(unittest.TestCase):
         )
         with (
             mock.patch.object(probe, "run_command", side_effect=samples),
+            mock.patch.object(
+                probe,
+                "resolve_trusted_executable",
+                return_value=Path("/usr/bin/ps"),
+                create=True,
+            ),
             mock.patch.object(probe.os, "cpu_count", return_value=8),
+            mock.patch.object(
+                probe.os,
+                "getloadavg",
+                return_value=(1.0, 2.0, 3.0),
+                create=True,
+            ),
             mock.patch.object(probe.time, "sleep"),
         ):
             result = probe._collect_cpu("Darwin", 0.1)
         self.assertEqual(30.0, result["utilization_percent"])
+        self.assertEqual(
+            {"1m": 1.0, "5m": 2.0, "15m": 3.0},
+            result["load_average"],
+        )
 
     def test_windows_memory_uses_native_status_values(self) -> None:
         with mock.patch.object(
@@ -235,10 +254,238 @@ class PlatformCollectorTests(unittest.TestCase):
             probe.CommandResult(0, "17179869184\n", ""),
             probe.CommandResult(0, vm_stat, ""),
         )
-        with mock.patch.object(probe, "run_command", side_effect=results):
+        with (
+            mock.patch.object(probe, "run_command", side_effect=results),
+            mock.patch.object(
+                probe,
+                "resolve_trusted_executable",
+                side_effect=(
+                    Path("/usr/bin/sysctl"),
+                    Path("/usr/bin/vm_stat"),
+                ),
+            ),
+        ):
             memory = probe._collect_memory("Darwin")
         self.assertEqual(17_179_869_184, memory["total_bytes"])
         self.assertEqual((100 + 200 + 10) * 16_384, memory["available_bytes"])
+
+    def test_cpu_sampling_failure_preserves_logical_cpus_and_load_average(
+        self,
+    ) -> None:
+        self.assertIn(
+            "unavailable",
+            inspect.signature(probe._collect_cpu).parameters,
+        )
+        unavailable: list[dict[str, str]] = []
+        with (
+            mock.patch.object(probe.os, "cpu_count", return_value=8),
+            mock.patch.object(
+                probe.os,
+                "getloadavg",
+                return_value=(0.25, 0.5, 0.75),
+                create=True,
+            ),
+            mock.patch.object(
+                probe.Path,
+                "read_text",
+                side_effect=PermissionError("proc stat denied"),
+            ),
+        ):
+            result = probe._collect_cpu("Linux", 0.1, unavailable)
+
+        self.assertEqual(8, result["logical_cpus"])
+        self.assertEqual(
+            {"1m": 0.25, "5m": 0.5, "15m": 0.75},
+            result["load_average"],
+        )
+        self.assertNotIn("utilization_percent", result)
+        self.assertIn(
+            {
+                "metric": "cpu.utilization_percent",
+                "reason": "proc stat denied",
+            },
+            unavailable,
+        )
+
+    def test_windows_load_average_has_precise_unsupported_reason(self) -> None:
+        self.assertIn(
+            "unavailable",
+            inspect.signature(probe._collect_cpu).parameters,
+        )
+        unavailable: list[dict[str, str]] = []
+        with (
+            mock.patch.object(probe.os, "cpu_count", return_value=4),
+            mock.patch.object(
+                probe,
+                "_windows_cpu_times",
+                side_effect=((100, 50), (200, 100)),
+            ),
+            mock.patch.object(probe.time, "sleep"),
+        ):
+            result = probe._collect_cpu("Windows", 0.1, unavailable)
+
+        self.assertEqual(50.0, result["utilization_percent"])
+        self.assertNotIn("load_average", result)
+        self.assertIn(
+            {
+                "metric": "cpu.load_average",
+                "reason": "load average is unsupported on Windows",
+            },
+            unavailable,
+        )
+
+    def test_macos_memory_preserves_total_when_vm_stat_fails(self) -> None:
+        self.assertIn(
+            "unavailable",
+            inspect.signature(probe._collect_memory).parameters,
+        )
+        unavailable: list[dict[str, str]] = []
+        with mock.patch.object(
+            probe,
+            "_checked_stdout",
+            side_effect=("17179869184\n", PermissionError("vm_stat denied")),
+        ):
+            result = probe._collect_memory("Darwin", unavailable)
+
+        self.assertEqual({"total_bytes": 17_179_869_184}, result)
+        self.assertIn(
+            {
+                "metric": "memory.available_bytes",
+                "reason": "vm_stat denied",
+            },
+            unavailable,
+        )
+
+    def test_macos_memory_preserves_available_when_sysctl_fails(self) -> None:
+        self.assertIn(
+            "unavailable",
+            inspect.signature(probe._collect_memory).parameters,
+        )
+        vm_stat = (FIXTURES / "macos-vm-stat.txt").read_text(encoding="utf-8")
+        unavailable: list[dict[str, str]] = []
+        with mock.patch.object(
+            probe,
+            "_checked_stdout",
+            side_effect=(PermissionError("sysctl denied"), vm_stat),
+        ):
+            result = probe._collect_memory("Darwin", unavailable)
+
+        self.assertEqual(
+            {"available_bytes": (100 + 200 + 10) * 16_384},
+            result,
+        )
+        self.assertIn(
+            {
+                "metric": "memory.total_bytes",
+                "reason": "sysctl denied",
+            },
+            unavailable,
+        )
+
+    def test_gpu_base_failure_does_not_suppress_nvidia_success(self) -> None:
+        base_collector = getattr(probe, "_base_gpu_devices", None)
+        self.assertIsNotNone(base_collector)
+        unavailable: list[dict[str, str]] = []
+        nvidia_device = probe._graphics_device(
+            name="NVIDIA Test",
+            vendor="NVIDIA",
+            memory_bytes=1024,
+            driver_version="1",
+            detection_source="nvidia-smi",
+            backend_name="cuda-driver",
+        )
+        with (
+            mock.patch.object(
+                probe,
+                "_base_gpu_devices",
+                side_effect=PermissionError("base discovery denied"),
+            ),
+            mock.patch.object(
+                probe,
+                "resolve_trusted_executable",
+                return_value=Path("/usr/bin/nvidia-smi"),
+            ),
+            mock.patch.object(
+                probe, "_nvidia_devices", return_value=[nvidia_device]
+            ),
+        ):
+            result = probe._collect_gpu("Linux", unavailable)
+
+        self.assertEqual([nvidia_device], result["devices"])
+        self.assertIn(
+            {"metric": "gpu.base", "reason": "base discovery denied"},
+            unavailable,
+        )
+
+    def test_gpu_nvidia_failure_does_not_suppress_base_success(self) -> None:
+        base_collector = getattr(probe, "_base_gpu_devices", None)
+        self.assertIsNotNone(base_collector)
+        unavailable: list[dict[str, str]] = []
+        base_device = probe._graphics_device(
+            name="Intel Test",
+            vendor="Intel",
+            memory_bytes=None,
+            driver_version=None,
+            detection_source="linux-sysfs",
+            backend_name="graphics-device",
+        )
+        with (
+            mock.patch.object(
+                probe, "_base_gpu_devices", return_value=[base_device]
+            ),
+            mock.patch.object(
+                probe,
+                "resolve_trusted_executable",
+                side_effect=FileNotFoundError(
+                    "no trusted executable candidate for nvidia-smi"
+                ),
+            ),
+        ):
+            result = probe._collect_gpu("Linux", unavailable)
+
+        self.assertEqual([base_device], result["devices"])
+        self.assertIn(
+            {
+                "metric": "gpu.nvidia",
+                "reason": "no trusted executable candidate for nvidia-smi",
+            },
+            unavailable,
+        )
+
+    def test_successful_zero_device_sources_are_not_marked_unavailable(
+        self,
+    ) -> None:
+        base_collector = getattr(probe, "_base_gpu_devices", None)
+        self.assertIsNotNone(base_collector)
+        unavailable: list[dict[str, str]] = []
+        with (
+            mock.patch.object(probe, "_base_gpu_devices", return_value=[]),
+            mock.patch.object(
+                probe,
+                "resolve_trusted_executable",
+                return_value=Path("/usr/bin/nvidia-smi"),
+            ),
+            mock.patch.object(probe, "_nvidia_devices", return_value=[]),
+        ):
+            result = probe._collect_gpu("Linux", unavailable)
+
+        self.assertEqual({"devices": []}, result)
+        self.assertEqual([], unavailable)
+
+    def test_nvidia_empty_output_is_a_successful_zero_device_result(self) -> None:
+        self.assertIn(
+            "allow_empty",
+            inspect.signature(probe._checked_stdout).parameters,
+        )
+        with mock.patch.object(
+            probe,
+            "run_command",
+            return_value=probe.CommandResult(0, "", ""),
+        ):
+            self.assertEqual(
+                [],
+                probe._nvidia_devices(Path("/usr/bin/nvidia-smi")),
+            )
 
     def test_windows_gpu_uses_cim_json_with_bounded_command_wrapper(self) -> None:
         gpu_json = (FIXTURES / "windows-gpu.json").read_text(encoding="utf-8")
@@ -246,12 +493,23 @@ class PlatformCollectorTests(unittest.TestCase):
             mock.patch.object(
                 probe, "run_command", return_value=probe.CommandResult(0, gpu_json, "")
             ) as command,
-            mock.patch.object(probe.shutil, "which", return_value=None),
+            mock.patch.object(
+                probe,
+                "resolve_trusted_executable",
+                side_effect=(
+                    Path("C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"),
+                    FileNotFoundError(
+                        "no trusted executable candidate for nvidia-smi"
+                    ),
+                ),
+                create=True,
+            ),
         ):
             result = probe._collect_gpu("Windows")
         self.assertEqual(2, len(result["devices"]))
         args = command.call_args.args[0]
-        self.assertEqual("powershell.exe", args[0])
+        self.assertTrue(Path(args[0]).is_absolute())
+        self.assertEqual("powershell.exe", Path(args[0]).name)
         self.assertIn("Win32_VideoController", args[-1])
 
     def test_windows_processes_use_cim_and_privacy_preserving_parser(self) -> None:
@@ -260,7 +518,14 @@ class PlatformCollectorTests(unittest.TestCase):
         )
         with mock.patch.object(
             probe, "run_command", return_value=probe.CommandResult(0, process_json, "")
-        ) as command:
+        ) as command, mock.patch.object(
+            probe,
+            "resolve_trusted_executable",
+            return_value=Path(
+                "C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
+            ),
+            create=True,
+        ):
             processes = probe._collect_processes("Windows")
         self.assertEqual(2, len(processes))
         self.assertEqual(ProcessParserTests.ALLOWED_KEYS, set(processes[0]))
@@ -283,33 +548,90 @@ class SampleValidationTests(unittest.TestCase):
 
 
 class CommandTests(unittest.TestCase):
+    class FakeProcess:
+        def __init__(
+            self,
+            stdout: bytes = b"",
+            stderr: bytes = b"",
+            running: bool = False,
+        ) -> None:
+            self.stdout = io.BytesIO(stdout)
+            self.stderr = io.BytesIO(stderr)
+            self.returncode = None if running else 0
+            self.killed = False
+            self.waited = False
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def wait(self) -> int:
+            self.waited = True
+            if self.returncode is None:
+                self.returncode = -9
+            return self.returncode
+
+        def kill(self) -> None:
+            self.killed = True
+            self.returncode = -9
+
     def test_run_command_rejects_invalid_timeout_before_starting_process(
         self,
     ) -> None:
         invalid_timeouts = (0, -1, 5.1, float("nan"), float("inf"), "invalid")
         for timeout in invalid_timeouts:
             with self.subTest(timeout=timeout), mock.patch.object(
-                probe.subprocess, "run"
-            ) as subprocess_run:
+                probe.subprocess, "Popen"
+            ) as popen:
                 with self.assertRaises(ValueError):
                     probe.run_command([sys.executable, "-V"], timeout_seconds=timeout)
-                subprocess_run.assert_not_called()
+                popen.assert_not_called()
 
     def test_run_command_accepts_five_second_binding_maximum(self) -> None:
-        completed = subprocess.CompletedProcess(
-            args=[sys.executable, "-V"],
-            returncode=0,
-            stdout="Python",
-            stderr="",
-        )
-        with mock.patch.object(
-            probe.subprocess, "run", return_value=completed
-        ) as subprocess_run:
-            result = probe.run_command(
-                [sys.executable, "-V"], timeout_seconds=5.0
-            )
+        result = probe.run_command([sys.executable, "-V"], timeout_seconds=5.0)
         self.assertEqual(0, result.returncode)
-        self.assertEqual(5.0, subprocess_run.call_args.kwargs["timeout"])
+        self.assertIn("Python", result.stdout)
+
+    def test_run_command_rejects_non_absolute_executable_before_start(
+        self,
+    ) -> None:
+        with mock.patch.object(probe.subprocess, "Popen") as popen:
+            with self.assertRaisesRegex(
+                ValueError, "absolute executable path"
+            ):
+                probe.run_command(["python", "-V"])
+        popen.assert_not_called()
+
+    def test_start_failure_does_not_expose_executable_path(self) -> None:
+        error_type = getattr(probe, "CommandStartError", None)
+        self.assertIsNotNone(error_type)
+        secret_path = str(Path(tempfile.gettempdir()) / "sensitive-tool.exe")
+        with mock.patch.object(
+            probe.subprocess,
+            "Popen",
+            side_effect=FileNotFoundError(2, "missing", secret_path),
+        ):
+            with self.assertRaises(error_type) as caught:
+                probe.run_command([sys.executable, "-V"])
+        self.assertNotIn(secret_path, str(caught.exception))
+        self.assertEqual(
+            "diagnostic child could not be started",
+            str(caught.exception),
+        )
+
+    def test_start_permission_failure_preserves_bounded_reason(self) -> None:
+        secret_path = str(Path(tempfile.gettempdir()) / "sensitive-tool.exe")
+        with mock.patch.object(
+            probe.subprocess,
+            "Popen",
+            side_effect=PermissionError(13, "denied", secret_path),
+        ):
+            with self.assertRaises(probe.CommandStartError) as caught:
+                probe.run_command([sys.executable, "-V"])
+        self.assertNotIn(secret_path, str(caught.exception))
+        self.assertEqual(
+            "diagnostic child permission denied",
+            str(caught.exception),
+        )
 
     def test_run_command_captures_utf8_output_without_a_shell(self) -> None:
         result = probe.run_command(
@@ -324,6 +646,230 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(0, result.returncode)
         self.assertEqual("resource probe ✓", result.stdout.strip())
         self.assertEqual("", result.stderr)
+
+    def test_run_command_uses_trusted_cwd_and_sanitized_environment(self) -> None:
+        child = self.FakeProcess(stdout=b"ok")
+        with (
+            mock.patch.object(probe.subprocess, "Popen", return_value=child) as popen,
+            mock.patch.object(
+                probe.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess(
+                    [sys.executable, "-V"],
+                    0,
+                    "ok",
+                    "",
+                ),
+            ),
+            mock.patch.dict(
+                probe.os.environ,
+                {
+                    "PATH": "project-shadow",
+                    "PYTHONPATH": "project-python",
+                    "VIRTUAL_ENV": "project-venv",
+                    "HOME": "project-home",
+                    "SystemRoot": "C:\\Windows",
+                },
+                clear=True,
+            ),
+        ):
+            result = probe.run_command([sys.executable, "-V"])
+
+        self.assertEqual("ok", result.stdout)
+        self.assertTrue(popen.called)
+        kwargs = popen.call_args.kwargs
+        self.assertFalse(kwargs["shell"])
+        self.assertTrue(Path(kwargs["cwd"]).is_absolute())
+        self.assertNotIn("PATH", kwargs["env"])
+        self.assertNotIn("PYTHONPATH", kwargs["env"])
+        self.assertNotIn("VIRTUAL_ENV", kwargs["env"])
+        self.assertNotIn("HOME", kwargs["env"])
+
+    def test_output_overflow_kills_only_owned_child_and_caps_capture(
+        self,
+    ) -> None:
+        output_limit = getattr(probe, "MAX_COMMAND_OUTPUT_BYTES", None)
+        error_type = getattr(probe, "CommandOutputLimitError", None)
+        self.assertEqual(1_048_576, output_limit)
+        self.assertIsNotNone(error_type)
+        child = self.FakeProcess(
+            stdout=b"x" * 700_000,
+            stderr=b"y" * 400_000,
+            running=True,
+        )
+        with mock.patch.object(probe.subprocess, "Popen", return_value=child):
+            with self.assertRaises(error_type) as caught:
+                probe.run_command([sys.executable, "-V"])
+
+        self.assertLessEqual(
+            caught.exception.captured_bytes,
+            output_limit,
+        )
+        self.assertTrue(child.killed)
+        self.assertTrue(child.waited)
+        self.assertTrue(child.stdout.closed)
+        self.assertTrue(child.stderr.closed)
+
+    def test_real_oversized_child_is_stopped_at_combined_byte_limit(self) -> None:
+        with self.assertRaises(probe.CommandOutputLimitError) as caught:
+            probe.run_command(
+                [
+                    sys.executable,
+                    "-c",
+                    "import sys,time;"
+                    "sys.stdout.buffer.write(b'x'*1048577);"
+                    "sys.stdout.buffer.flush();"
+                    "time.sleep(2)",
+                ],
+                timeout_seconds=2.0,
+            )
+        self.assertEqual(
+            probe.MAX_COMMAND_OUTPUT_BYTES,
+            caught.exception.captured_bytes,
+        )
+
+    def test_timeout_kills_owned_child_waits_and_closes_streams(self) -> None:
+        error_type = getattr(probe, "CommandTimeoutError", None)
+        self.assertIsNotNone(error_type)
+        child = self.FakeProcess(running=True)
+        with mock.patch.object(probe.subprocess, "Popen", return_value=child):
+            with self.assertRaisesRegex(
+                error_type,
+                "diagnostic child timed out",
+            ):
+                probe.run_command(
+                    [sys.executable, "-V"],
+                    timeout_seconds=0.05,
+                )
+
+        self.assertTrue(child.killed)
+        self.assertTrue(child.waited)
+        self.assertTrue(child.stdout.closed)
+        self.assertTrue(child.stderr.closed)
+
+    def test_real_timed_out_child_is_stopped_before_natural_exit(self) -> None:
+        started = time.monotonic()
+        with self.assertRaises(probe.CommandTimeoutError):
+            probe.run_command(
+                [sys.executable, "-c", "import time; time.sleep(2)"],
+                timeout_seconds=0.05,
+            )
+        self.assertLess(time.monotonic() - started, 1.0)
+
+    def test_trusted_resolution_ignores_cwd_and_path_shadows(self) -> None:
+        resolver = getattr(probe, "resolve_trusted_executable", None)
+        self.assertIsNotNone(resolver)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            system_root = root / "Windows"
+            trusted = (
+                system_root
+                / "System32"
+                / "WindowsPowerShell"
+                / "v1.0"
+                / "powershell.exe"
+            )
+            trusted.parent.mkdir(parents=True)
+            trusted.write_bytes(b"trusted")
+            shadow = root / "project"
+            shadow.mkdir()
+            (shadow / "powershell.exe").write_bytes(b"shadow")
+
+            with (
+                mock.patch.dict(
+                    probe.os.environ,
+                    {
+                        "SystemRoot": str(system_root),
+                        "PATH": str(shadow),
+                    },
+                    clear=True,
+                ),
+                mock.patch.object(probe.os, "getcwd", return_value=str(shadow)),
+            ):
+                resolved = resolver(
+                    "powershell.exe",
+                    system="Windows",
+                )
+
+        self.assertEqual(trusted, resolved)
+        self.assertNotEqual(shadow / "powershell.exe", resolved)
+
+    def test_windows_nvidia_resolution_ignores_path_shadow(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            program_files = root / "Program Files"
+            trusted = (
+                program_files
+                / "NVIDIA Corporation"
+                / "NVSMI"
+                / "nvidia-smi.exe"
+            )
+            trusted.parent.mkdir(parents=True)
+            trusted.write_bytes(b"trusted")
+            shadow = root / "project"
+            shadow.mkdir()
+            (shadow / "nvidia-smi.exe").write_bytes(b"shadow")
+
+            with mock.patch.dict(
+                probe.os.environ,
+                {
+                    "ProgramFiles": str(program_files),
+                    "PATH": str(shadow),
+                },
+                clear=True,
+            ):
+                resolved = probe.resolve_trusted_executable(
+                    "nvidia-smi",
+                    system="Windows",
+                )
+
+        self.assertEqual(trusted, resolved)
+        self.assertNotEqual(shadow / "nvidia-smi.exe", resolved)
+
+    def test_posix_resolution_ignores_path_shadow_and_rejects_symlink(
+        self,
+    ) -> None:
+        resolver = getattr(probe, "resolve_trusted_executable", None)
+        self.assertIsNotNone(resolver)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            trusted_root = root / "usr" / "bin"
+            trusted_root.mkdir(parents=True)
+            trusted = trusted_root / "ps"
+            trusted.write_bytes(b"trusted")
+            trusted.chmod(0o555)
+            shadow = root / "project"
+            shadow.mkdir()
+            (shadow / "ps").write_bytes(b"shadow")
+
+            with (
+                mock.patch.object(
+                    probe,
+                    "POSIX_TRUSTED_DIRECTORIES",
+                    (trusted_root,),
+                ),
+                mock.patch.dict(probe.os.environ, {"PATH": str(shadow)}, clear=True),
+            ):
+                self.assertEqual(
+                    trusted,
+                    resolver("ps", system="Linux"),
+                )
+                original_is_symlink = Path.is_symlink
+
+                def simulated_symlink(path: Path) -> bool:
+                    return path == trusted or original_is_symlink(path)
+
+                with mock.patch.object(
+                    probe.Path,
+                    "is_symlink",
+                    autospec=True,
+                    side_effect=simulated_symlink,
+                ):
+                    with self.assertRaisesRegex(
+                        FileNotFoundError,
+                        "no trusted executable candidate for ps",
+                    ):
+                        resolver("ps", system="Linux")
 
 
 class RecommendationTests(unittest.TestCase):
@@ -349,6 +895,7 @@ class RecommendationTests(unittest.TestCase):
                     profile["max_workers"] for profile in result["profiles"].values()
                 }
                 self.assertEqual({1}, workers)
+                self.assertEqual("low-impact", result["selected_profile"])
 
     def test_high_cpu_caps_balanced_to_half_logical_cpus(self) -> None:
         result = probe.build_recommendation(
@@ -356,6 +903,57 @@ class RecommendationTests(unittest.TestCase):
             {"total_bytes": 100, "available_bytes": 80},
         )
         self.assertEqual(4, result["profiles"]["balanced"]["max_workers"])
+        self.assertEqual("low-impact", result["selected_profile"])
+
+    def test_one_cpu_allows_zero_workers_to_preserve_reserves(self) -> None:
+        result = probe.build_recommendation(
+            {"logical_cpus": 1, "utilization_percent": 20.0},
+            {"total_bytes": 100, "available_bytes": 80},
+        )
+        self.assertEqual(
+            {
+                "low-impact": 0,
+                "balanced": 0,
+                "throughput": 0,
+            },
+            {
+                name: profile["max_workers"]
+                for name, profile in result["profiles"].items()
+            },
+        )
+
+    def test_two_cpus_preserve_each_profiles_stated_reserve(self) -> None:
+        result = probe.build_recommendation(
+            {"logical_cpus": 2, "utilization_percent": 20.0},
+            {"total_bytes": 100, "available_bytes": 80},
+        )
+        self.assertEqual(0, result["profiles"]["low-impact"]["max_workers"])
+        self.assertEqual(1, result["profiles"]["balanced"]["max_workers"])
+        self.assertEqual(1, result["profiles"]["throughput"]["max_workers"])
+
+    def test_unknown_memory_caps_all_profiles_and_selects_low_impact(self) -> None:
+        result = probe.build_recommendation(
+            {"logical_cpus": 8, "utilization_percent": 20.0},
+            {"total_bytes": 100},
+        )
+        self.assertEqual(
+            {1},
+            {profile["max_workers"] for profile in result["profiles"].values()},
+        )
+        self.assertEqual("low-impact", result["selected_profile"])
+
+    def test_unknown_utilization_caps_all_profiles_and_selects_low_impact(
+        self,
+    ) -> None:
+        result = probe.build_recommendation(
+            {"logical_cpus": 8},
+            {"total_bytes": 100, "available_bytes": 80},
+        )
+        self.assertEqual(
+            {1},
+            {profile["max_workers"] for profile in result["profiles"].values()},
+        )
+        self.assertEqual("low-impact", result["selected_profile"])
 
     def test_memory_cap_applies_below_but_not_at_25_percent(self) -> None:
         below = probe.build_recommendation(
@@ -398,6 +996,8 @@ class RecommendationTests(unittest.TestCase):
         self.assertEqual(
             {1}, {item["max_workers"] for item in boundary["profiles"].values()}
         )
+        self.assertEqual("low-impact", below["selected_profile"])
+        self.assertEqual("low-impact", boundary["selected_profile"])
 
 
 class SnapshotTests(unittest.TestCase):
@@ -505,28 +1105,51 @@ class SnapshotTests(unittest.TestCase):
 
     def test_missing_windows_tool_degrades_gpu_only(self) -> None:
         unavailable: list[dict[str, str]] = []
-        with mock.patch.object(
-            probe,
-            "run_command",
-            side_effect=FileNotFoundError("powershell.exe was not found"),
+        with (
+            mock.patch.object(
+                probe,
+                "_base_gpu_devices",
+                side_effect=FileNotFoundError(
+                    "no trusted executable candidate for powershell.exe"
+                ),
+            ),
+            mock.patch.object(
+                probe,
+                "resolve_trusted_executable",
+                side_effect=FileNotFoundError(
+                    "no trusted executable candidate for nvidia-smi"
+                ),
+            ),
         ):
-            result = probe._collect_degraded(
-                probe._collect_gpu,
-                ("Windows",),
-                "gpu.devices",
-                unavailable,
-                {"devices": []},
-            )
+            result = probe._collect_gpu("Windows", unavailable)
         self.assertEqual({"devices": []}, result)
-        self.assertEqual("gpu.devices", unavailable[0]["metric"])
-        self.assertIn("powershell.exe", unavailable[0]["reason"])
+        self.assertEqual(
+            {
+                "gpu.base":
+                "no trusted executable candidate for powershell.exe",
+                "gpu.nvidia":
+                "no trusted executable candidate for nvidia-smi",
+            },
+            {
+                item["metric"]: item["reason"]
+                for item in unavailable
+            },
+        )
 
     def test_process_command_timeout_degrades_processes_only(self) -> None:
+        error_type = getattr(probe, "CommandTimeoutError", None)
+        self.assertIsNotNone(error_type)
         unavailable: list[dict[str, str]] = []
         with mock.patch.object(
             probe,
             "run_command",
-            side_effect=subprocess.TimeoutExpired(["ps"], 5.0),
+            side_effect=error_type(
+                "diagnostic child timed out after 5.0 seconds"
+            ),
+        ), mock.patch.object(
+            probe,
+            "resolve_trusted_executable",
+            return_value=Path("/usr/bin/ps"),
         ):
             result = probe._collect_degraded(
                 probe._collect_processes,
@@ -538,6 +1161,47 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual([], result)
         self.assertEqual("processes", unavailable[0]["metric"])
         self.assertIn("timed out", unavailable[0]["reason"])
+
+    def test_successful_empty_process_result_is_not_unavailable(self) -> None:
+        with (
+            mock.patch.object(
+                probe,
+                "_collect_cpu",
+                return_value={
+                    "logical_cpus": 8,
+                    "utilization_percent": 20.0,
+                    "load_average": {"1m": 0.1, "5m": 0.2, "15m": 0.3},
+                },
+            ),
+            mock.patch.object(
+                probe,
+                "_collect_memory",
+                return_value={"total_bytes": 100, "available_bytes": 50},
+            ),
+            mock.patch.object(
+                probe,
+                "_collect_disk",
+                return_value={
+                    "total_bytes": 1000,
+                    "used_bytes": 500,
+                    "free_bytes": 500,
+                },
+            ),
+            mock.patch.object(probe, "_collect_gpu", return_value={"devices": []}),
+            mock.patch.object(probe, "_collect_processes", return_value=[]),
+            mock.patch.object(probe.platform, "system", return_value="Linux"),
+        ):
+            snapshot = probe.collect_snapshot(
+                sample_seconds=0.1,
+                include_processes=True,
+            )
+
+        self.assertFalse(
+            any(item["metric"] == "processes" for item in snapshot["unavailable"])
+        )
+        self.assertFalse(
+            any(item["metric"] == "gpu.devices" for item in snapshot["unavailable"])
+        )
 
 
 class CliTests(unittest.TestCase):
@@ -581,6 +1245,59 @@ class CliTests(unittest.TestCase):
             self.assertEqual("", stdout)
             self.assertEqual(sample_snapshot(), json.loads(output.read_text("utf-8")))
             self.assertEqual("", stderr)
+
+    def test_existing_output_file_is_rejected_without_overwrite(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / "snapshot.json"
+            output.write_text("keep me", encoding="utf-8")
+            with mock.patch.object(
+                probe, "collect_snapshot", return_value=sample_snapshot()
+            ):
+                result, stdout, stderr = self.run_main(
+                    ["--format", "json", "--output", str(output)]
+                )
+
+            self.assertEqual(1, result)
+            self.assertEqual("", stdout)
+            self.assertIn("already exists", stderr)
+            self.assertEqual("keep me", output.read_text(encoding="utf-8"))
+
+    def test_symlink_output_file_is_rejected_without_following(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            target = directory / "target.json"
+            target.write_text("keep target", encoding="utf-8")
+            output = directory / "snapshot.json"
+            try:
+                output.symlink_to(target)
+            except OSError:
+                original_is_symlink = Path.is_symlink
+
+                def simulated_symlink(path: Path) -> bool:
+                    return path == output or original_is_symlink(path)
+
+                symlink_patch = mock.patch.object(
+                    probe.Path,
+                    "is_symlink",
+                    autospec=True,
+                    side_effect=simulated_symlink,
+                )
+            else:
+                symlink_patch = contextlib.nullcontext()
+
+            with symlink_patch, mock.patch.object(
+                probe,
+                "collect_snapshot",
+                return_value=sample_snapshot(),
+            ):
+                result, stdout, stderr = self.run_main(
+                    ["--format", "json", "--output", str(output)]
+                )
+
+            self.assertEqual(1, result)
+            self.assertEqual("", stdout)
+            self.assertIn("symlink", stderr)
+            self.assertEqual("keep target", target.read_text(encoding="utf-8"))
 
     def test_invalid_sampling_returns_exit_code_two(self) -> None:
         result, stdout, stderr = self.run_main(["--sample-seconds", "0"])

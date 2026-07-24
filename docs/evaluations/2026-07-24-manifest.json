@@ -1,0 +1,48 @@
+{
+  "schema_version": "1.0",
+  "evaluation_date": "2026-07-24",
+  "harness": "Codex collaboration API",
+  "scorer_identity": "/root/task6_forward_test",
+  "canonical_skill": {
+    "path": "skills/resource-safe-execution/SKILL.md",
+    "sha256": "7af28a3ace1cc9e87c397b9a2e77c14b676af62bccb1f00e13dd1e83811cdbdd"
+  },
+  "evaluations": [
+    {
+      "scenario_id": "concurrency-pressure",
+      "prompt_sha256": "24902a44c8d3dc900bd1cd109e83880753f85df96c1b26b30b541a2836341451",
+      "response_path": "docs/evaluations/raw/skill-enabled/concurrency-pressure.md",
+      "response_sha256": "c6409c4fb20d1a773e36b433c41ba38e0cb74ec01f89c6fb454e9edafcc2e29f",
+      "evaluator_task_id": "/root/task6_forward_test/skill_concurrency",
+      "model": "not captured by collaboration API",
+      "reasoning_effort": "not captured by collaboration API"
+    },
+    {
+      "scenario_id": "renderer-pressure",
+      "prompt_sha256": "63f1da32524a0f754d15b9bf9420a7f00fef037aeae4484e16ef83ffc41e431b",
+      "response_path": "docs/evaluations/raw/skill-enabled/renderer-pressure.md",
+      "response_sha256": "3dd1df1bb3380f60ebd877cb5baa141f7d96139152ae5fc8e4401655556746b4",
+      "evaluator_task_id": "/root/task6_forward_test/skill_renderer",
+      "model": "not captured by collaboration API",
+      "reasoning_effort": "not captured by collaboration API"
+    },
+    {
+      "scenario_id": "cleanup-pressure",
+      "prompt_sha256": "55c91a0038707ece1dface59030ac3d9d49655d70337c452aca36285e59b288c",
+      "response_path": "docs/evaluations/raw/skill-enabled/cleanup-pressure.md",
+      "response_sha256": "5127a11ac7e4d266bc8593ece37ece890c5da0c1508c4b2058ecb1f9d957525b",
+      "evaluator_task_id": "/root/task6_forward_test/skill_cleanup_rerun",
+      "model": "not captured by collaboration API",
+      "reasoning_effort": "not captured by collaboration API"
+    },
+    {
+      "scenario_id": "gpu-assumption",
+      "prompt_sha256": "49c4c2da3092b47de97fe5168c554a6214e82df4d37abb0bb3a453196659ef21",
+      "response_path": "docs/evaluations/raw/skill-enabled/gpu-assumption.md",
+      "response_sha256": "b889098ba22f0a6917de2c37c65223adec7b480a7cda29cc51bf0213296b3539",
+      "evaluator_task_id": "/root/task6_forward_test/skill_gpu",
+      "model": "not captured by collaboration API",
+      "reasoning_effort": "not captured by collaboration API"
+    }
+  ]
+}

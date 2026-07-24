@@ -10,11 +10,14 @@ personal data.
 
 ## Runtime boundary
 
-The probe is intended to remain read-only. It performs no network access,
-telemetry, package installation, privilege escalation, or process termination.
-It does not expose command lines, environment variables, usernames, file
-contents, tokens, or network destinations in process summaries. Reports that
-cross this boundary are security-sensitive.
+The probe performs read-only host inspection, with one explicit optional
+output-file write that creates a new regular file exclusively. It performs no
+network access, telemetry, package installation, or privilege escalation. It
+never terminates pre-existing or unrelated processes; it may stop only its own
+diagnostic child after the five-second timeout or one-MiB combined-output bound
+overflows. It does not expose command lines, environment variables, usernames,
+file contents, tokens, or network destinations in process summaries. Reports
+that cross this boundary are security-sensitive.
 
 ## Supported releases
 

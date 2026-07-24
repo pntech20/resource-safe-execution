@@ -5,7 +5,8 @@
 > superpowers:executing-plans to implement this plan task-by-task. Steps use
 > checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Publish a portable Agent Skill and read-only probe that help coding
+**Goal:** Publish a portable Agent Skill and probe for read-only host
+inspection, with an explicit optional output-file write, that help coding
 agents plan, launch, monitor, and clean up resource-intensive work safely on
 Windows, macOS, and Linux.
 
@@ -27,10 +28,13 @@ library, `unittest`, GitHub Actions, PowerShell/CIM, macOS system tools, Linux
 - The folder and frontmatter name are exactly `resource-safe-execution`.
 - `SKILL.md` stays below 500 lines and 5,000 tokens.
 - The runtime requires Python 3.10+ and uses only the standard library.
-- The runtime performs no network access, telemetry, package installation,
-  privilege escalation, or process termination.
-- Every subprocess uses an argument list, `shell=False`, a bounded timeout,
-  and captured text output.
+- The runtime performs no network access, telemetry, package installation, or
+  privilege escalation. It never terminates pre-existing or unrelated
+  processes; on timeout or output overflow, it may stop only its own bounded
+  diagnostic child.
+- Every subprocess uses a trusted absolute executable path, an argument list,
+  `shell=False`, a trusted working directory, a sanitized environment, a
+  five-second timeout, and a one-MiB combined-output bound.
 - Process summaries never include command lines, environment variables,
   usernames, file contents, tokens, or network destinations.
 - Hardware detection is not treated as proof that an application uses an
@@ -51,8 +55,9 @@ library, `unittest`, GitHub Actions, PowerShell/CIM, macOS system tools, Linux
 - `skills/resource-safe-execution/SKILL.md`: portable activation workflow.
 - `skills/resource-safe-execution/agents/openai.yaml`: optional Codex UI
   metadata that is not required by the portable workflow.
-- `skills/resource-safe-execution/scripts/resource_probe.py`: read-only CLI
-  and importable parser/collector functions.
+- `skills/resource-safe-execution/scripts/resource_probe.py`: read-only
+  host-inspection CLI with an optional exclusive output-file write, plus
+  importable parser/collector functions.
 - `skills/resource-safe-execution/references/*.md`: GPU, lifecycle, and
   operating-system guidance loaded only when relevant.
 - `skills/resource-safe-execution/evals/evals.json`: portable scenario and
@@ -436,10 +441,11 @@ required_keys = {
 }
 ```
 
-Exercise `main()` with JSON to stdout, text to stdout, output-file success,
-invalid sampling exit code `2`, an unwritable output exit code `1`, and an
-unsupported-platform exit code `3` that explains the unsupported system
-without inventing metrics.
+Exercise `main()` with JSON to stdout, text to stdout, exclusive output-file
+success, rejection of existing and symlink destinations, invalid sampling exit
+code `2`, output-write failure exit code `1`, and unsupported-platform exit
+code `3` that explains the unsupported system without inventing metrics. No
+overwrite or force option exists in version `0.1.0`.
 
 - [ ] **Step 2: Verify RED**
 
@@ -463,18 +469,21 @@ class CommandResult:
     stderr: str
 
 def run_command(args: Sequence[str], timeout_seconds: float = 5.0) -> CommandResult:
-    completed = subprocess.run(
+    child = subprocess.Popen(
         list(args),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=timeout_seconds,
-        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=trusted_working_directory,
+        env=sanitized_environment,
         shell=False,
     )
-    return CommandResult(completed.returncode, completed.stdout, completed.stderr)
+    # Concurrent readers retain at most 1,048,576 combined bytes.
+    # Stop and wait for only this child on timeout or output overflow.
 ```
+
+`run_command` rejects non-absolute executable paths. Resolve diagnostic tools
+only from explicit system-owned candidates; never consult the project
+directory or inherited `PATH`.
 
 Represent every unavailable metric as:
 
@@ -491,15 +500,17 @@ collector fails.
 Calculate usable workers from logical CPU headroom and memory pressure:
 
 ```text
-low-impact: max(1, logical_cpus - 2)
-balanced: max(1, logical_cpus - 1)
-throughput: max(1, logical_cpus - 1)
+low-impact: max(0, logical_cpus - 2)
+balanced: max(0, logical_cpus - 1)
+throughput: max(0, logical_cpus - 1)
 ```
 
-Then cap to `1` when available memory is below 25 percent or sampled CPU is at
-least 90 percent. Cap balanced to half the logical CPUs when sampled CPU is at
-least 75 percent. Return the selected default profile as `balanced` and
-include human-readable reasons.
+Cap every profile at one worker and select `low-impact` when memory
+availability or sampled CPU utilization is unknown, available memory is below
+25 percent, or sampled CPU is at least 90 percent. At CPU utilization from 75
+through just below 90 percent, keep the balanced half-CPU cap and select
+`low-impact`. Select `balanced` only when both memory and utilization are known
+and below those pressure boundaries.
 
 - [ ] **Step 5: Verify GREEN**
 
@@ -583,11 +594,13 @@ Parse the probe with `ast` and reject imports whose root module is:
 {"requests", "httpx", "urllib", "socket", "ftplib", "smtplib"}
 ```
 
-Reject calls named `kill`, `killpg`, `terminate`, `send_signal`, `Popen`, or
-`os.system`; `subprocess.run` with `shell=True`; destructive command
-fragments; package-manager commands; and subprocess calls without a timeout.
-Scan output serializers to ensure no keys named `command_line`, `cmdline`,
-`environment`, `username`, `token`, or `network_destination`.
+Permit `Popen` and its owned child's `kill` method only inside `run_command`;
+reject calls named `kill`, `killpg`, `terminate`, or `send_signal` everywhere
+else, plus `os.system`, `subprocess.run`, shell execution, destructive command
+fragments, and package-manager commands. Require the timeout and combined
+output constants. Scan output serializers to ensure no keys named
+`command_line`, `cmdline`, `environment`, `username`, `token`, or
+`network_destination`.
 
 - [ ] **Step 3: Verify RED**
 
@@ -729,7 +742,7 @@ Antigravity global: ~/.gemini/config/skills/resource-safe-execution
 Show the open installer command:
 
 ```powershell
-npx skills add pntech20/resource-safe-execution --skill resource-safe-execution
+npx --yes skills@1.5.20 add https://github.com/pntech20/resource-safe-execution/tree/v0.1.0/skills/resource-safe-execution --skill resource-safe-execution --copy
 ```
 
 State that users must review executable skill contents before installation.
@@ -743,9 +756,10 @@ documentation-only project releases.
 `CONTRIBUTING.md` must require tests for behavioral or parser changes,
 evidence for compatibility claims, no vendor-only canonical syntax, and the
 full local test command. `SECURITY.md` must define private vulnerability
-reporting through GitHub Security Advisories, the no-network/no-termination
-runtime boundary, supported release policy, and response targets without
-promising guaranteed resolution.
+reporting through GitHub Security Advisories, the no-network boundary, the
+owned diagnostic child's timeout/overflow lifecycle, the prohibition on
+terminating pre-existing or unrelated processes, supported release policy,
+and response targets without promising guaranteed resolution.
 
 - [ ] **Step 5: Add pinned multi-OS CI**
 
@@ -852,10 +866,10 @@ Target this Codex environment:
 C:\Users\Admin\.codex\skills\resource-safe-execution
 ```
 
-If the target does not exist, copy the canonical directory. If it exists and
-is byte-identical, leave it in place. If it differs, create a timestamped
-sibling backup before replacing it. Re-run the repository validator against
-the installed copy and record the result in `docs/compatibility.md`.
+Final-review correction: do not overwrite or otherwise modify an existing
+local installation. Validate the repository candidate and manifest-driven
+clean-copy layout independently, and record the installed copy as historical
+evidence if it differs from the final candidate.
 
 - [ ] **Step 4: Update release status honestly**
 

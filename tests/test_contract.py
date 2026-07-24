@@ -1,3 +1,4 @@
+import hashlib
 import json
 import re
 import unittest
@@ -123,6 +124,85 @@ class SkillContractTests(unittest.TestCase):
         ]
         self.assertEqual(fixture_contract, eval_contract)
         self.assertNotIn("response", json.dumps(evals).lower())
+
+    def test_cleanup_contract_requires_scoped_evidence_and_refusal(self) -> None:
+        normalized = " ".join(self.body.split()).lower()
+        required_clauses = (
+            "locate the task-scoped ownership record",
+            "identify its owned root and group",
+            "verify the root pid plus start identity",
+            "invoke only the recorded graceful cleanup",
+            "if any step lacks evidence, refuse termination",
+        )
+        for clause in required_clauses:
+            with self.subTest(clause=clause):
+                self.assertIn(clause, normalized)
+        self.assertIn("then verify exit", normalized)
+
+    def test_evaluation_manifest_hashes_every_artifact_and_provenance_field(
+        self,
+    ) -> None:
+        manifest_path = (
+            REPO_ROOT / "docs" / "evaluations" / "2026-07-24-manifest.json"
+        )
+        self.assertTrue(manifest_path.is_file(), str(manifest_path))
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual("1.0", manifest["schema_version"])
+        self.assertEqual("2026-07-24", manifest["evaluation_date"])
+        self.assertEqual("Codex collaboration API", manifest["harness"])
+        self.assertEqual("/root/task6_forward_test", manifest["scorer_identity"])
+
+        canonical = manifest["canonical_skill"]
+        self.assertEqual(
+            "skills/resource-safe-execution/SKILL.md",
+            canonical["path"],
+        )
+        canonical_path = REPO_ROOT / Path(*PurePosixPath(canonical["path"]).parts)
+        self.assertEqual(
+            hashlib.sha256(canonical_path.read_bytes()).hexdigest(),
+            canonical["sha256"],
+        )
+
+        fixture = json.loads(
+            (REPO_ROOT / "tests" / "fixtures" / "behavior-scenarios.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        prompts = {
+            scenario["id"]: scenario["prompt"]
+            for scenario in fixture["scenarios"]
+        }
+        evaluations = manifest["evaluations"]
+        self.assertEqual(set(prompts), {
+            evaluation["scenario_id"] for evaluation in evaluations
+        })
+        self.assertEqual(len(prompts), len(evaluations))
+
+        unavailable_metadata = "not captured by collaboration API"
+        for evaluation in evaluations:
+            with self.subTest(scenario=evaluation["scenario_id"]):
+                scenario_id = evaluation["scenario_id"]
+                self.assertEqual(
+                    hashlib.sha256(
+                        prompts[scenario_id].encode("utf-8")
+                    ).hexdigest(),
+                    evaluation["prompt_sha256"],
+                )
+                response_relative = PurePosixPath(evaluation["response_path"])
+                self.assertFalse(response_relative.is_absolute())
+                self.assertNotIn("..", response_relative.parts)
+                response_path = REPO_ROOT / Path(*response_relative.parts)
+                self.assertTrue(response_path.is_file())
+                self.assertEqual(
+                    hashlib.sha256(response_path.read_bytes()).hexdigest(),
+                    evaluation["response_sha256"],
+                )
+                self.assertRegex(evaluation["evaluator_task_id"], r"^/root/")
+                self.assertEqual(unavailable_metadata, evaluation["model"])
+                self.assertEqual(
+                    unavailable_metadata,
+                    evaluation["reasoning_effort"],
+                )
 
 
 if __name__ == "__main__":

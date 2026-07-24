@@ -10,25 +10,37 @@ monitoring work, and cleaning up only processes it started.
 ## What it does
 
 The canonical [Agent Skill](skills/resource-safe-execution) combines portable
-policy with a Python 3.10+ read-only probe for CPU, memory, disk, GPU visibility,
-and process summaries. Platform-specific guidance is loaded from direct local
-links in the skill folder.
+policy with a Python 3.10+ probe for read-only host inspection of CPU, memory,
+disk, GPU visibility, and privacy-preserving process summaries. Its only
+optional write is an explicitly requested output file. Platform-specific
+guidance is loaded from direct local links in the skill folder.
 
 ## Safety guarantees
 
 The bundled runtime uses only the Python standard library. It performs no
-network access, telemetry, package installation, privilege escalation, or
-process termination. Process summaries exclude command lines, environment
-variables, usernames, file contents, tokens, and network destinations.
-Detection of GPU hardware is not presented as proof that an application uses a
-particular acceleration backend.
+network access, telemetry, package installation, or privilege escalation. It
+never terminates pre-existing or unrelated processes. It may stop only its own
+diagnostic child when the five-second timeout or one-MiB combined-output bound
+overflows. Process summaries exclude command lines, environment variables,
+usernames, file contents, tokens, and network destinations. Detection of GPU
+hardware is not presented as proof that an application uses a particular
+acceleration backend.
 
 ## Install
 
 Review all executable skill contents, especially
 `scripts/resource_probe.py`, before installation.
 
-Copy the canonical folder to one of these destinations:
+The safe default is a reviewed, checksum-verified copy:
+
+1. Use the exact reviewed release checkout.
+2. Verify the nine paths and SHA-256 hashes in the
+   [installation manifest](skill-manifest.json) against
+   [SHA256SUMS](SHA256SUMS).
+3. Copy only those nine manifest-listed regular files, then verify the
+   destination contains exactly the same paths and hashes.
+
+Use the appropriate destination root:
 
 | Client and scope | Destination |
 | --- | --- |
@@ -39,11 +51,11 @@ Copy the canonical folder to one of these destinations:
 | Antigravity workspace | `.agents/skills/resource-safe-execution` |
 | Antigravity global | `~/.gemini/config/skills/resource-safe-execution` |
 
-The open [`skills`](https://github.com/vercel-labs/skills) installer can also
-copy the package:
+The open [`skills`](https://github.com/vercel-labs/skills) installer is a
+convenience-only remote route. Copy-layout tests do not exercise it:
 
 ```powershell
-npx skills add pntech20/resource-safe-execution --skill resource-safe-execution
+npx --yes skills@1.5.20 add https://github.com/pntech20/resource-safe-execution/tree/v0.1.0/skills/resource-safe-execution --skill resource-safe-execution --copy
 ```
 
 Review the installed files again before allowing an agent to execute them.
@@ -66,24 +78,26 @@ client-specific claim.
 
 The release candidate remains `v0.1.0`. All 17 required skill-enabled behavior
 signals are present in the [auditable evaluation](docs/evaluations/2026-07-24-skill-enabled.md),
-and the canonical package is installed byte-identically in this host's active
-Codex skills directory.
+and final-review provenance is hash-checked by the repository suite. The
+existing local Codex installation was not overwritten during final review.
 
 Windows was physically exercised on this host with the live probe, both
-validators, and the 54-test repository suite. macOS and Linux have
-deterministic fixture coverage and configured hosted CI, but those hosted jobs
-have not completed. Claude Code, Antigravity, physical macOS, physical Linux,
-and proprietary client runtime checks remain unperformed; no runtime
-compatibility claim is made.
+validators, and the repository suite. macOS and Linux have deterministic
+fixture coverage and configured hosted CI, but those hosted jobs have not
+completed. Claude Code, Antigravity, physical macOS, physical Linux, and
+proprietary client runtime checks remain unperformed; no runtime compatibility
+claim is made.
 
 ## Run the probe directly
 
 ```powershell
-python skills/resource-safe-execution/scripts/resource_probe.py --pretty
+python skills/resource-safe-execution/scripts/resource_probe.py --format json
 ```
 
-The probe prints one JSON document. Missing host metrics degrade individually
-with a machine-readable reason.
+The probe prints one JSON document. `--output NEW_FILE` performs an optional
+output-file write and creates the destination exclusively; it refuses existing
+files, symlinks, and invalid parent paths. Missing host metrics degrade
+individually with a machine-readable reason.
 
 ## Validate
 

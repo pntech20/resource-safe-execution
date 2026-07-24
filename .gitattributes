@@ -1,0 +1,4 @@
+skills/resource-safe-execution/** text eol=lf
+docs/evaluations/raw/** text eol=lf
+skill-manifest.json text eol=lf
+SHA256SUMS text eol=lf

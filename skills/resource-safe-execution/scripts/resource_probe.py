@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Emit a dependency-free, read-only platform resource snapshot."""
+"""Emit a dependency-free snapshot from read-only host inspection."""
 
 from __future__ import annotations
 
@@ -12,8 +12,10 @@ import os
 import platform
 import re
 import shutil
+import stat
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -26,7 +28,23 @@ PROBE_VERSION = "0.1.0"
 MIN_SAMPLE_SECONDS = 0.1
 MAX_SAMPLE_SECONDS = 10.0
 MAX_COMMAND_TIMEOUT_SECONDS = 5.0
+MAX_COMMAND_OUTPUT_BYTES = 1_048_576
 SUPPORTED_PLATFORMS = {"Linux", "Darwin", "Windows"}
+POSIX_TRUSTED_DIRECTORIES = (
+    Path("/bin"),
+    Path("/usr/bin"),
+    Path("/usr/sbin"),
+    Path("/usr/local/bin"),
+)
+TRUSTED_TOOL_NAMES = {
+    "nvidia-smi",
+    "pmset",
+    "powershell.exe",
+    "ps",
+    "sysctl",
+    "system_profiler",
+    "vm_stat",
+}
 
 
 @dataclass(frozen=True)
@@ -34,6 +52,170 @@ class CommandResult:
     returncode: int
     stdout: str
     stderr: str
+
+
+class CommandTimeoutError(RuntimeError):
+    """The owned diagnostic child exceeded its bounded runtime."""
+
+
+class CommandOutputLimitError(RuntimeError):
+    """The owned diagnostic child exceeded its combined output allowance."""
+
+    def __init__(self, captured_bytes: int) -> None:
+        self.captured_bytes = captured_bytes
+        super().__init__(
+            f"diagnostic child exceeded the {MAX_COMMAND_OUTPUT_BYTES}-byte "
+            "combined output limit"
+        )
+
+
+class CommandStartError(RuntimeError):
+    """The diagnostic child could not be started without exposing its path."""
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def _current_user_can_write(path: Path) -> bool:
+    metadata = path.stat()
+    mode = stat.S_IMODE(metadata.st_mode)
+    if mode & stat.S_IWOTH:
+        return True
+    getuid = getattr(os, "geteuid", None)
+    getgroups = getattr(os, "getgroups", None)
+    getgid = getattr(os, "getegid", None)
+    if getuid is None:
+        return bool(mode & (stat.S_IWUSR | stat.S_IWGRP))
+    user_id = getuid()
+    if user_id == 0:
+        return bool(mode & (stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
+    if metadata.st_uid == user_id and mode & stat.S_IWUSR:
+        return True
+    group_ids = set(getgroups() if getgroups is not None else ())
+    if getgid is not None:
+        group_ids.add(getgid())
+    return metadata.st_gid in group_ids and bool(mode & stat.S_IWGRP)
+
+
+def _regular_non_symlink(path: Path) -> bool:
+    try:
+        return path.is_file() and not path.is_symlink()
+    except OSError:
+        return False
+
+
+def resolve_trusted_executable(
+    name: str,
+    *,
+    system: str | None = None,
+) -> Path:
+    """Resolve a known diagnostic tool without consulting cwd or PATH."""
+    selected_system = system or platform.system()
+    normalized = name.lower()
+    if normalized == "powershell":
+        normalized = "powershell.exe"
+    if normalized == "nvidia-smi.exe":
+        normalized = "nvidia-smi"
+    if normalized not in TRUSTED_TOOL_NAMES:
+        raise FileNotFoundError(
+            f"no trusted executable candidate for {name}"
+        )
+
+    if selected_system == "Windows":
+        system_root_text = os.environ.get("SystemRoot") or os.environ.get("WINDIR")
+        program_files_text = os.environ.get("ProgramFiles")
+        candidates: list[tuple[Path, Path]] = []
+        if system_root_text:
+            system_root = Path(system_root_text).expanduser()
+            if normalized == "powershell.exe":
+                candidates.append(
+                    (
+                        system_root
+                        / "System32"
+                        / "WindowsPowerShell"
+                        / "v1.0"
+                        / "powershell.exe",
+                        system_root,
+                    )
+                )
+            elif normalized == "nvidia-smi":
+                candidates.append(
+                    (
+                        system_root / "System32" / "nvidia-smi.exe",
+                        system_root,
+                    )
+                )
+        if program_files_text and normalized == "nvidia-smi":
+            program_files = Path(program_files_text).expanduser()
+            candidates.append(
+                (
+                    program_files
+                    / "NVIDIA Corporation"
+                    / "NVSMI"
+                    / "nvidia-smi.exe",
+                    program_files,
+                )
+            )
+
+        for candidate, trusted_root in candidates:
+            try:
+                absolute_candidate = candidate.absolute()
+                absolute_root = trusted_root.absolute()
+            except OSError:
+                continue
+            if (
+                _is_relative_to(absolute_candidate, absolute_root)
+                and _regular_non_symlink(absolute_candidate)
+            ):
+                return absolute_candidate
+        raise FileNotFoundError(
+            f"no trusted executable candidate for {name}"
+        )
+
+    if selected_system in {"Linux", "Darwin"} and normalized != "powershell.exe":
+        for trusted_root in POSIX_TRUSTED_DIRECTORIES:
+            candidate = trusted_root / normalized
+            try:
+                absolute_root = trusted_root.resolve(strict=True)
+                absolute_candidate = candidate.resolve(strict=True)
+            except OSError:
+                continue
+            if (
+                _is_relative_to(absolute_candidate, absolute_root)
+                and _regular_non_symlink(candidate)
+                and os.access(candidate, os.X_OK)
+                and not _current_user_can_write(candidate)
+            ):
+                return candidate
+    raise FileNotFoundError(f"no trusted executable candidate for {name}")
+
+
+def _trusted_working_directory() -> Path:
+    if platform.system() == "Windows":
+        root_text = os.environ.get("SystemRoot") or os.environ.get("WINDIR")
+        if root_text:
+            system32 = Path(root_text) / "System32"
+            if system32.is_dir() and not system32.is_symlink():
+                return system32.absolute()
+    return Path(os.path.abspath(os.sep))
+
+
+def _sanitized_environment() -> dict[str, str]:
+    environment: dict[str, str] = {}
+    if platform.system() == "Windows":
+        root_text = os.environ.get("SystemRoot") or os.environ.get("WINDIR")
+        if root_text:
+            environment["SystemRoot"] = root_text
+            environment["WINDIR"] = root_text
+    else:
+        environment["LANG"] = "C"
+        environment["LC_ALL"] = "C"
+    return environment
 
 
 def run_command(
@@ -52,17 +234,100 @@ def run_command(
             f"command timeout must be greater than 0 and at most "
             f"{MAX_COMMAND_TIMEOUT_SECONDS} seconds"
         )
-    completed = subprocess.run(
-        list(args),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=validated_timeout,
-        check=False,
-        shell=False,
+
+    command = [os.fspath(argument) for argument in args]
+    if not command or not Path(command[0]).is_absolute():
+        raise ValueError("command must start with an absolute executable path")
+
+    try:
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=os.fspath(_trusted_working_directory()),
+            env=_sanitized_environment(),
+            shell=False,
+            bufsize=0,
+        )
+    except PermissionError:
+        raise CommandStartError(
+            "diagnostic child permission denied"
+        ) from None
+    except OSError:
+        raise CommandStartError(
+            "diagnostic child could not be started"
+        ) from None
+    assert process.stdout is not None
+    assert process.stderr is not None
+
+    buffers = (bytearray(), bytearray())
+    capture_lock = threading.Lock()
+    overflow = threading.Event()
+    captured_bytes = 0
+
+    def read_bounded(stream: object, output: bytearray) -> None:
+        nonlocal captured_bytes
+        while not overflow.is_set():
+            chunk = stream.read(65_536)
+            if not chunk:
+                return
+            with capture_lock:
+                remaining = MAX_COMMAND_OUTPUT_BYTES - captured_bytes
+                accepted = min(len(chunk), max(0, remaining))
+                if accepted:
+                    output.extend(chunk[:accepted])
+                    captured_bytes += accepted
+                if accepted < len(chunk):
+                    overflow.set()
+                    return
+
+    readers = (
+        threading.Thread(
+            target=read_bounded,
+            args=(process.stdout, buffers[0]),
+            daemon=True,
+        ),
+        threading.Thread(
+            target=read_bounded,
+            args=(process.stderr, buffers[1]),
+            daemon=True,
+        ),
     )
-    return CommandResult(completed.returncode, completed.stdout, completed.stderr)
+    for reader in readers:
+        reader.start()
+
+    deadline = time.monotonic() + validated_timeout
+    breach: str | None = None
+    while process.poll() is None:
+        if overflow.is_set():
+            breach = "overflow"
+            break
+        remaining_seconds = deadline - time.monotonic()
+        if remaining_seconds <= 0:
+            breach = "timeout"
+            break
+        overflow.wait(min(0.01, remaining_seconds))
+
+    if breach is not None and process.poll() is None:
+        process.kill()
+    returncode = process.wait()
+    for reader in readers:
+        reader.join()
+    process.stdout.close()
+    process.stderr.close()
+
+    if overflow.is_set():
+        raise CommandOutputLimitError(captured_bytes)
+    if breach == "timeout":
+        raise CommandTimeoutError(
+            f"diagnostic child timed out after {validated_timeout:g} seconds"
+        )
+    return CommandResult(
+        returncode,
+        bytes(buffers[0]).decode("utf-8", errors="replace"),
+        bytes(buffers[1]).decode("utf-8", errors="replace"),
+    )
 
 
 def parse_linux_cpu_stat(text: str) -> tuple[int, int]:
@@ -413,13 +678,31 @@ def validate_sample_seconds(value: str) -> float:
     return parsed
 
 
-def _checked_stdout(args: Sequence[str]) -> str:
-    result = run_command(args, timeout_seconds=5.0)
+def _checked_stdout(
+    args: Sequence[str],
+    *,
+    system: str | None = None,
+    executable: Path | None = None,
+    allow_empty: bool = False,
+) -> str:
+    if not args:
+        raise ValueError("diagnostic command is empty")
+    tool_name = Path(args[0]).name
+    resolved = executable or resolve_trusted_executable(
+        tool_name,
+        system=system,
+    )
+    result = run_command(
+        [os.fspath(resolved), *args[1:]],
+        timeout_seconds=5.0,
+    )
     if result.returncode != 0:
-        reason = result.stderr.strip() or f"command exited with {result.returncode}"
-        raise RuntimeError(reason)
-    if not result.stdout.strip():
-        raise ValueError(f"{args[0]} returned no data")
+        error_text = result.stderr.lower()
+        if "permission denied" in error_text or "access is denied" in error_text:
+            raise PermissionError(f"{tool_name} permission denied")
+        raise RuntimeError(f"{tool_name} exited with status {result.returncode}")
+    if not allow_empty and not result.stdout.strip():
+        raise ValueError(f"{tool_name} returned no data")
     return result.stdout
 
 
@@ -463,48 +746,94 @@ def _windows_memory_status() -> tuple[int, int]:
     return int(status.total_physical), int(status.available_physical)
 
 
-def _collect_cpu(system: str, sample_seconds: float) -> dict[str, object]:
+def _collect_cpu(
+    system: str,
+    sample_seconds: float,
+    unavailable: list[dict[str, str]] | None = None,
+) -> dict[str, object]:
     logical_cpus = os.cpu_count() or 1
     result: dict[str, object] = {"logical_cpus": logical_cpus}
-    if system == "Linux":
-        before = parse_linux_cpu_stat(
-            Path("/proc/stat").read_text(encoding="utf-8")
-        )
-        time.sleep(sample_seconds)
-        after = parse_linux_cpu_stat(
-            Path("/proc/stat").read_text(encoding="utf-8")
-        )
-        result["utilization_percent"] = calculate_cpu_percent(before, after)
-    elif system == "Windows":
-        before = _windows_cpu_times()
-        time.sleep(sample_seconds)
-        after = _windows_cpu_times()
-        result["utilization_percent"] = calculate_cpu_percent(before, after)
-    elif system == "Darwin":
-        samples = []
-        for sample_index in range(2):
-            output = _checked_stdout(["ps", "-A", "-o", "%cpu="])
-            values = []
-            for raw_value in output.splitlines():
-                try:
-                    value = float(raw_value.strip())
-                except ValueError:
-                    continue
-                if math.isfinite(value) and value >= 0:
-                    values.append(value)
-            if not values:
-                raise ValueError("ps returned no CPU percentages")
-            samples.append(sum(values))
-            if sample_index == 0:
-                time.sleep(sample_seconds)
-        result["utilization_percent"] = round(
-            min(100.0, max(0.0, sum(samples) / len(samples) / logical_cpus)),
-            1,
+    try:
+        if system == "Linux":
+            before = parse_linux_cpu_stat(
+                Path("/proc/stat").read_text(encoding="utf-8")
+            )
+            time.sleep(sample_seconds)
+            after = parse_linux_cpu_stat(
+                Path("/proc/stat").read_text(encoding="utf-8")
+            )
+            result["utilization_percent"] = calculate_cpu_percent(before, after)
+        elif system == "Windows":
+            before = _windows_cpu_times()
+            time.sleep(sample_seconds)
+            after = _windows_cpu_times()
+            result["utilization_percent"] = calculate_cpu_percent(before, after)
+        elif system == "Darwin":
+            samples = []
+            for sample_index in range(2):
+                output = _checked_stdout(
+                    ["ps", "-A", "-o", "%cpu="],
+                    system=system,
+                )
+                values = []
+                for raw_value in output.splitlines():
+                    try:
+                        value = float(raw_value.strip())
+                    except ValueError:
+                        continue
+                    if math.isfinite(value) and value >= 0:
+                        values.append(value)
+                if not values:
+                    raise ValueError("ps returned no CPU percentages")
+                samples.append(sum(values))
+                if sample_index == 0:
+                    time.sleep(sample_seconds)
+            result["utilization_percent"] = round(
+                min(100.0, max(0.0, sum(samples) / len(samples) / logical_cpus)),
+                1,
+            )
+    except Exception as exc:
+        if unavailable is not None:
+            unavailable.append(
+                _unavailable("cpu.utilization_percent", _bounded_reason(exc))
+            )
+
+    if system in {"Linux", "Darwin"}:
+        try:
+            getloadavg = getattr(os, "getloadavg")
+            load_average = tuple(float(value) for value in getloadavg())
+            if (
+                len(load_average) != 3
+                or any(
+                    not math.isfinite(value) or value < 0
+                    for value in load_average
+                )
+            ):
+                raise ValueError("load average returned malformed values")
+            result["load_average"] = {
+                "1m": load_average[0],
+                "5m": load_average[1],
+                "15m": load_average[2],
+            }
+        except Exception as exc:
+            if unavailable is not None:
+                unavailable.append(
+                    _unavailable("cpu.load_average", _bounded_reason(exc))
+                )
+    elif system == "Windows" and unavailable is not None:
+        unavailable.append(
+            _unavailable(
+                "cpu.load_average",
+                "load average is unsupported on Windows",
+            )
         )
     return result
 
 
-def _collect_memory(system: str) -> dict[str, object]:
+def _collect_memory(
+    system: str,
+    unavailable: list[dict[str, str]] | None = None,
+) -> dict[str, object]:
     if system == "Linux":
         return parse_linux_meminfo(Path("/proc/meminfo").read_text(encoding="utf-8"))
     if system == "Windows":
@@ -514,15 +843,34 @@ def _collect_memory(system: str) -> dict[str, object]:
             "available_bytes": available_bytes,
         }
     if system == "Darwin":
-        total_text = _checked_stdout(["sysctl", "-n", "hw.memsize"])
         try:
-            total_bytes = int(total_text.strip())
-        except ValueError as exc:
-            raise ValueError("sysctl hw.memsize is not an integer") from exc
-        memory: dict[str, object] = {"total_bytes": total_bytes}
-        memory.update(
-            parse_macos_vm_stat(_checked_stdout(["vm_stat"]))
-        )
+            total_text = _checked_stdout(
+                ["sysctl", "-n", "hw.memsize"],
+                system=system,
+            )
+            try:
+                total_bytes = int(total_text.strip())
+            except ValueError as exc:
+                raise ValueError("sysctl hw.memsize is not an integer") from exc
+        except Exception as exc:
+            if unavailable is not None:
+                unavailable.append(
+                    _unavailable("memory.total_bytes", _bounded_reason(exc))
+                )
+            memory: dict[str, object] = {}
+        else:
+            memory = {"total_bytes": total_bytes}
+        try:
+            memory.update(
+                parse_macos_vm_stat(
+                    _checked_stdout(["vm_stat"], system=system)
+                )
+            )
+        except Exception as exc:
+            if unavailable is not None:
+                unavailable.append(
+                    _unavailable("memory.available_bytes", _bounded_reason(exc))
+                )
         return memory
     return {}
 
@@ -571,14 +919,44 @@ def _linux_gpu_devices() -> list[dict[str, object]]:
     return devices
 
 
-def _nvidia_devices() -> list[dict[str, object]]:
+def _base_gpu_devices(system: str) -> list[dict[str, object]]:
+    if system == "Windows":
+        output = _checked_stdout(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Get-CimInstance Win32_VideoController | "
+                "Select-Object Name,AdapterRAM,DriverVersion,"
+                "AdapterCompatibility | ConvertTo-Json -Compress",
+            ],
+            system=system,
+            allow_empty=True,
+        )
+        return parse_windows_gpu(output)
+    if system == "Darwin":
+        return parse_macos_displays(
+            _checked_stdout(
+                ["system_profiler", "SPDisplaysDataType", "-json"],
+                system=system,
+            )
+        )
+    if system == "Linux":
+        return _linux_gpu_devices()
+    return []
+
+
+def _nvidia_devices(executable: Path) -> list[dict[str, object]]:
     output = _checked_stdout(
         [
             "nvidia-smi",
             "--query-gpu=index,name,driver_version,memory.total,memory.used,"
             "utilization.gpu",
             "--format=csv,noheader,nounits",
-        ]
+        ],
+        executable=executable,
+        allow_empty=True,
     )
     devices = []
     for raw in parse_nvidia_smi(output):
@@ -592,7 +970,7 @@ def _nvidia_devices() -> list[dict[str, object]]:
         )
         normalized.update(raw)
         devices.append(normalized)
-    if not devices:
+    if output.strip() and not devices:
         raise ValueError("nvidia-smi returned no valid device rows")
     return devices
 
@@ -601,39 +979,28 @@ def _collect_gpu(
     system: str,
     unavailable: list[dict[str, str]] | None = None,
 ) -> dict[str, object]:
-    if system == "Windows":
-        output = _checked_stdout(
-            [
-                "powershell.exe",
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                "Get-CimInstance Win32_VideoController | "
-                "Select-Object Name,AdapterRAM,DriverVersion,"
-                "AdapterCompatibility | ConvertTo-Json -Compress",
-            ]
-        )
-        devices = parse_windows_gpu(output)
-    elif system == "Darwin":
-        devices = parse_macos_displays(
-            _checked_stdout(
-                ["system_profiler", "SPDisplaysDataType", "-json"]
-            )
-        )
-    elif system == "Linux":
-        devices = _linux_gpu_devices()
-    else:
+    try:
+        devices = _base_gpu_devices(system)
+    except Exception as exc:
         devices = []
+        if unavailable is not None:
+            unavailable.append(
+                _unavailable("gpu.base", _bounded_reason(exc))
+            )
 
-    if shutil.which("nvidia-smi"):
-        try:
-            nvidia_devices = _nvidia_devices()
-        except Exception as exc:
-            if unavailable is not None:
-                unavailable.append(
-                    _unavailable("gpu.nvidia", _bounded_reason(exc))
-                )
-        else:
+    try:
+        nvidia_executable = resolve_trusted_executable(
+            "nvidia-smi",
+            system=system,
+        )
+        nvidia_devices = _nvidia_devices(nvidia_executable)
+    except Exception as exc:
+        if unavailable is not None:
+            unavailable.append(
+                _unavailable("gpu.nvidia", _bounded_reason(exc))
+            )
+    else:
+        if nvidia_devices:
             devices = [
                 device for device in devices if device.get("vendor") != "NVIDIA"
             ]
@@ -653,19 +1020,23 @@ def _collect_processes(system: str) -> list[dict[str, object]]:
                 "Win32_PerfFormattedData_PerfProc_Process | "
                 "Select-Object IDProcess,Name,PercentProcessorTime,"
                 "WorkingSetPrivate | ConvertTo-Json -Compress",
-            ]
+            ],
+            system=system,
         )
         return parse_windows_processes(output)
     if system in {"Linux", "Darwin"}:
         return parse_posix_processes(
-            _checked_stdout(["ps", "-axo", "pid=,pcpu=,rss=,comm="])
+            _checked_stdout(
+                ["ps", "-axo", "pid=,pcpu=,rss=,comm="],
+                system=system,
+            )
         )
     return []
 
 
 def _collect_power(system: str) -> dict[str, object]:
     if system == "Darwin":
-        output = _checked_stdout(["pmset", "-g", "batt"])
+        output = _checked_stdout(["pmset", "-g", "batt"], system=system)
         result: dict[str, object] = {"detection_source": "pmset"}
         source_match = re.search(r"Now drawing from '([^']+)'", output)
         percent_match = re.search(r"(\d+)%", output)
@@ -729,47 +1100,78 @@ def _collect_degraded(
 def build_recommendation(
     cpu: dict[str, object], memory: dict[str, object]
 ) -> dict[str, object]:
-    """Return conservative worker limits and the balanced default profile."""
+    """Return conservative worker limits and the selected profile."""
     logical_cpus = max(1, int(cpu.get("logical_cpus") or 1))
     worker_limits = {
-        "low-impact": max(1, logical_cpus - 2),
-        "balanced": max(1, logical_cpus - 1),
-        "throughput": max(1, logical_cpus - 1),
+        "low-impact": max(0, logical_cpus - 2),
+        "balanced": max(0, logical_cpus - 1),
+        "throughput": max(0, logical_cpus - 1),
     }
     reasons = ["Worker limits reserve logical CPU headroom."]
+    selected_profile = "balanced"
 
     total_bytes = memory.get("total_bytes")
     available_bytes = memory.get("available_bytes")
-    low_memory = (
+    memory_known = (
         isinstance(total_bytes, (int, float))
         and isinstance(available_bytes, (int, float))
+        and not isinstance(total_bytes, bool)
+        and not isinstance(available_bytes, bool)
+        and math.isfinite(total_bytes)
+        and math.isfinite(available_bytes)
         and total_bytes > 0
-        and available_bytes / total_bytes < 0.25
+        and available_bytes >= 0
+    )
+    low_memory = (
+        memory_known and available_bytes / total_bytes < 0.25
     )
     utilization = cpu.get("utilization_percent")
     cpu_percent = (
         float(utilization)
-        if isinstance(utilization, (int, float)) and math.isfinite(utilization)
+        if (
+            isinstance(utilization, (int, float))
+            and not isinstance(utilization, bool)
+            and math.isfinite(utilization)
+        )
         else None
     )
 
-    if low_memory or (cpu_percent is not None and cpu_percent >= 90.0):
-        worker_limits = {name: 1 for name in worker_limits}
+    if not memory_known or cpu_percent is None:
+        worker_limits = {
+            name: min(max_workers, 1)
+            for name, max_workers in worker_limits.items()
+        }
+        selected_profile = "low-impact"
+        if not memory_known:
+            reasons.append(
+                "Memory availability is unknown; cap workers at 1."
+            )
+        if cpu_percent is None:
+            reasons.append(
+                "Sampled CPU utilization is unknown; cap workers at 1."
+            )
+    elif low_memory or cpu_percent >= 90.0:
+        worker_limits = {
+            name: min(max_workers, 1)
+            for name, max_workers in worker_limits.items()
+        }
+        selected_profile = "low-impact"
         if low_memory:
             reasons.append("Available memory is below 25 percent; cap workers at 1.")
-        if cpu_percent is not None and cpu_percent >= 90.0:
+        if cpu_percent >= 90.0:
             reasons.append("Sampled CPU is at least 90 percent; cap workers at 1.")
-    elif cpu_percent is not None and cpu_percent >= 75.0:
+    elif cpu_percent >= 75.0:
         worker_limits["balanced"] = min(
-            worker_limits["balanced"], max(1, logical_cpus // 2)
+            worker_limits["balanced"], logical_cpus // 2
         )
+        selected_profile = "low-impact"
         reasons.append(
             "Sampled CPU is at least 75 percent; cap balanced workers at half "
             "the logical CPUs."
         )
 
     return {
-        "selected_profile": "balanced",
+        "selected_profile": selected_profile,
         "profiles": {
             name: {"max_workers": max_workers}
             for name, max_workers in worker_limits.items()
@@ -796,14 +1198,14 @@ def collect_snapshot(
     unavailable: list[dict[str, str]] = []
     cpu = _collect_degraded(
         _collect_cpu,
-        (system, validated_sample_seconds),
+        (system, validated_sample_seconds, unavailable),
         "cpu.utilization_percent",
         unavailable,
         {},
     )
     memory = _collect_degraded(
         _collect_memory,
-        (system,),
+        (system, unavailable),
         "memory.available_bytes",
         unavailable,
         {},
@@ -847,9 +1249,19 @@ def collect_snapshot(
     assert isinstance(power, dict)
     assert isinstance(processes, list)
 
-    if "logical_cpus" not in cpu:
+    cpu_failure_reason = next(
+        (
+            item["reason"]
+            for item in unavailable
+            if item["metric"] == "cpu.utilization_percent"
+        ),
+        "CPU collector did not return a value.",
+    )
+    if "logical_cpus" not in cpu and not any(
+        item["metric"] == "cpu.logical_cpus" for item in unavailable
+    ):
         unavailable.append(
-            _unavailable("cpu.logical_cpus", "CPU collector did not return a value.")
+            _unavailable("cpu.logical_cpus", cpu_failure_reason)
         )
     if "utilization_percent" not in cpu and not any(
         item["metric"] == "cpu.utilization_percent" for item in unavailable
@@ -857,15 +1269,28 @@ def collect_snapshot(
         unavailable.append(
             _unavailable(
                 "cpu.utilization_percent",
-                f"CPU sampling for {system} is not implemented in the core probe.",
+                "CPU sampler did not return a value.",
             )
         )
-    if "total_bytes" not in memory:
+    if "load_average" not in cpu and not any(
+        item["metric"] == "cpu.load_average" for item in unavailable
+    ):
         unavailable.append(
-            _unavailable(
-                "memory.total_bytes",
-                f"Memory collection for {system} is not implemented in the core probe.",
-            )
+            _unavailable("cpu.load_average", cpu_failure_reason)
+        )
+    memory_failure_reason = next(
+        (
+            item["reason"]
+            for item in unavailable
+            if item["metric"].startswith("memory.")
+        ),
+        "Memory collector did not return a value.",
+    )
+    if "total_bytes" not in memory and not any(
+        item["metric"] == "memory.total_bytes" for item in unavailable
+    ):
+        unavailable.append(
+            _unavailable("memory.total_bytes", memory_failure_reason)
         )
     if "available_bytes" not in memory and not any(
         item["metric"] == "memory.available_bytes" for item in unavailable
@@ -873,7 +1298,7 @@ def collect_snapshot(
         unavailable.append(
             _unavailable(
                 "memory.available_bytes",
-                f"Memory collection for {system} is not implemented in the core probe.",
+                memory_failure_reason,
             )
         )
     disk_failure_reason = next(
@@ -890,25 +1315,6 @@ def collect_snapshot(
             item["metric"] == metric for item in unavailable
         ):
             unavailable.append(_unavailable(metric, disk_failure_reason))
-    if not gpu.get("devices") and not any(
-        item["metric"] == "gpu.devices" for item in unavailable
-    ):
-        unavailable.append(
-            _unavailable(
-                "gpu.devices",
-                "GPU detection is not implemented in the core probe.",
-            )
-        )
-    if include_processes and not processes and not any(
-        item["metric"] == "processes" for item in unavailable
-    ):
-        unavailable.append(
-            _unavailable(
-                "processes",
-                "Process collection is not implemented in the core probe.",
-            )
-        )
-
     platform_snapshot: dict[str, object] = {
         "system": system,
         "release": platform.release(),
@@ -966,6 +1372,39 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _write_output_exclusive(path_text: str, content: str) -> None:
+    destination = Path(path_text).expanduser().absolute()
+    if destination.is_symlink():
+        raise FileExistsError("output destination is a symlink")
+    if destination.exists():
+        raise FileExistsError("output destination already exists")
+
+    parent = destination.parent
+    current = parent
+    while True:
+        if current.is_symlink():
+            raise OSError("output parent path contains a symlink")
+        if current == current.parent:
+            break
+        current = current.parent
+    if not parent.is_dir():
+        raise OSError("output parent is not an existing regular directory")
+
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_BINARY"):
+        flags |= os.O_BINARY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(destination, flags, 0o600)
+    with os.fdopen(
+        descriptor,
+        "w",
+        encoding="utf-8",
+        newline="",
+    ) as output:
+        output.write(content)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     try:
@@ -995,7 +1434,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.output:
         try:
-            Path(args.output).write_text(rendered + "\n", encoding="utf-8")
+            _write_output_exclusive(args.output, rendered + "\n")
         except OSError as exc:
             print(f"Could not write output file: {_bounded_reason(exc)}", file=sys.stderr)
             return 1

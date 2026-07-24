@@ -13,12 +13,12 @@ Follow the numbered sections in order. Re-run preflight after a material workloa
 
 ## 1. Preflight
 
-1. Run the read-only [resource probe](scripts/resource_probe.py) for a minimal platform snapshot.
+1. Run the [resource probe](scripts/resource_probe.py) for a minimal read-only host-inspection snapshot.
 2. Inspect current CPU, memory, paging, disk space and pressure, relevant processes, and GPU state with platform read-only sources.
 3. Record the task directory, intended commands, expected duration, interactive-use needs, and recovery constraints.
 4. Treat probe recommendations as conservative guidance. Reduce work further when the machine remains unresponsive.
 
-The probe is read-only guidance, not permission to launch or terminate anything.
+The probe performs read-only host inspection unless an explicit `--output` path requests its optional output-file write. That write creates a new file exclusively and refuses an existing path or symlink. The probe never terminates pre-existing or unrelated processes; it may stop only its own diagnostic child when the five-second timeout or one-MiB combined-output bound overflows. This guidance is not permission to launch or terminate workload processes.
 
 ## 2. Classify the workload
 
@@ -56,7 +56,7 @@ When cleanup is requested without an ownership record, the response must still g
 
 ## Non-negotiable safeguards
 
-- Keep all inspection read-only until the launch plan, resource profile, and ownership record are defined.
+- Keep host inspection read-only until the launch plan, resource profile, and ownership record are defined; treat an explicitly requested probe output file as task-scoped state.
 - Bound concurrency and preserve the selected profile's recovery headroom.
 - Reject broad termination by executable name; identify an owned root and verify its start identity first.
 - Reproduce hardware-renderer failure before fallback, verify the active renderer, scope fallback to the task, and restore normal configuration.
@@ -67,4 +67,4 @@ When cleanup is requested without an ownership record, the response must still g
 - Read [GPU selection](references/gpu-selection.md) before assigning work to a GPU or changing a renderer.
 - Read [process lifecycle](references/process-lifecycle.md) before launching, tracking, or cleaning up processes.
 - Read the platform guide for [Windows](references/windows.md), [macOS](references/macos.md), or [Linux](references/linux.md) before choosing inspection and ownership APIs.
-- Run the read-only [resource probe](scripts/resource_probe.py) for the minimal portable snapshot.
+- Run the [resource probe](scripts/resource_probe.py) for the minimal portable read-only host-inspection snapshot.

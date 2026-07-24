@@ -25,8 +25,9 @@ The skill must prevent common agent failures such as:
 - terminating unrelated user processes by executable name;
 - treating a brief utilization spike as proof that hardware is inadequate.
 
-The skill provides guidance and read-only diagnostics. Version 1 does not
-enforce hard operating-system quotas or terminate processes automatically.
+The skill provides guidance and read-only host inspection, with an explicit
+optional output-file write. Version 1 does not enforce hard operating-system
+quotas or terminate workload processes automatically.
 
 ## 2. Standards and portability contract
 
@@ -145,14 +146,16 @@ only the instructions, references, evaluations, and runtime probe.
 ## 5. Resource probe
 
 `resource_probe.py` will be a Python 3.10+ standard-library program. It will
-perform read-only inspection and require no package installation, network
-access, administrator privileges, telemetry, or persistent service.
+perform read-only host inspection and require no package installation, network
+access, administrator privileges, telemetry, or persistent service. Its
+optional output-file write creates a new regular file exclusively and refuses
+existing destinations, symlinks, and invalid parent paths.
 
 ### Inputs
 
 - output mode: concise text or JSON;
 - sampling duration within a bounded range;
-- optional output file;
+- optional output file, created exclusively without an overwrite mode;
 - optional inclusion of a privacy-preserving top-process summary.
 
 ### Output
@@ -176,8 +179,9 @@ usernames, file contents, access tokens, or network destinations.
 
 ### Platform adapters
 
-- Windows: use documented PowerShell/CIM and NVIDIA interfaces with bounded
-  subprocess timeouts and locale-tolerant parsing.
+- Windows: use documented PowerShell/CIM and NVIDIA interfaces with trusted
+  absolute executable paths, five-second subprocess timeouts, a one-MiB
+  combined-output bound, and locale-tolerant parsing.
 - macOS: use `sysctl`, `vm_stat`, `ps`, `df`, `pmset`, and
   `system_profiler -json` when available. Treat Apple Silicon memory as shared
   rather than adding CPU and GPU memory together.
@@ -252,7 +256,9 @@ process that must survive the agent session is reported to the user instead of
 being silently abandoned.
 
 Version 1 will teach and evaluate this discipline but will not ship an
-automatic process killer. A later opt-in governor may add process-group
+automatic workload-process killer. The probe never terminates pre-existing or
+unrelated processes. It may stop its own bounded diagnostic child only after a
+timeout or output overflow. A later opt-in governor may add process-group
 timeouts after separate security design and testing.
 
 ## 9. Testing strategy
@@ -266,8 +272,10 @@ timeouts after separate security design and testing.
   multiple-GPU conditions.
 - Test JSON schema stability, exit codes, sampling bounds, concurrency boundary
   values, and privacy redaction.
-- Assert that the probe contains no process-termination, download, telemetry,
-  package-installation, or privilege-escalation behavior.
+- Assert that diagnostic-child creation and termination exist only in the
+  bounded command wrapper, which may stop only its own child on timeout or
+  output overflow; prohibit every other process-termination path, download,
+  telemetry, package-installation, or privilege-escalation behavior.
 - Smoke-test repository discovery and installation into clean temporary agent
   homes for Codex, Claude Code, Antigravity, Cursor, and OpenCode.
 
@@ -354,8 +362,10 @@ Version 1.0 is ready only when:
    Antigravity; Tier 2 results are documented separately.
 4. Baseline agent evaluations fail for the intended reasons, and the
    corresponding skill-enabled evaluations pass.
-5. No probe path performs network access, telemetry, privilege escalation,
-   package installation, or process termination.
+5. No probe path performs network access, telemetry, privilege escalation, or
+   package installation. The probe never terminates pre-existing or unrelated
+   processes and may stop only its own diagnostic child on timeout or output
+   overflow.
 6. The Windows probe runs successfully on the maintainer's machine.
 7. macOS support is marked CI-validated until physical Intel and Apple Silicon
    results are available.

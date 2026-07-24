@@ -8,7 +8,7 @@ PROBE_PATH = (
     REPO_ROOT / "skills" / "resource-safe-execution" / "scripts" / "resource_probe.py"
 )
 FORBIDDEN_IMPORTS = {"requests", "httpx", "urllib", "socket", "ftplib", "smtplib"}
-FORBIDDEN_CALLS = {"kill", "killpg", "terminate", "send_signal", "Popen"}
+FORBIDDEN_CALLS = {"killpg", "terminate", "send_signal"}
 SENSITIVE_OUTPUT_KEYS = {
     "command_line",
     "cmdline",
@@ -62,6 +62,20 @@ class StaticSafetyTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.source = PROBE_PATH.read_text(encoding="utf-8")
         cls.tree = ast.parse(cls.source)
+        cls.parents = {
+            child: parent
+            for parent in ast.walk(cls.tree)
+            for child in ast.iter_child_nodes(parent)
+        }
+
+    @classmethod
+    def enclosing_function(cls, node: ast.AST) -> str | None:
+        current = node
+        while current in cls.parents:
+            current = cls.parents[current]
+            if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                return current.name
+        return None
 
     def test_probe_has_no_network_capable_imports(self) -> None:
         roots = set()
@@ -72,7 +86,7 @@ class StaticSafetyTests(unittest.TestCase):
                 roots.add(node.module.split(".", 1)[0])
         self.assertEqual(set(), roots & FORBIDDEN_IMPORTS)
 
-    def test_probe_has_no_process_termination_or_shell_execution(self) -> None:
+    def test_owned_child_lifecycle_calls_exist_only_in_run_command(self) -> None:
         violations = []
         for node in ast.walk(self.tree):
             if not isinstance(node, ast.Call):
@@ -80,6 +94,10 @@ class StaticSafetyTests(unittest.TestCase):
             name = call_name(node)
             if name in FORBIDDEN_CALLS:
                 violations.append(name)
+            if name in {"Popen", "kill"} and self.enclosing_function(node) != "run_command":
+                violations.append(
+                    f"{name} outside run_command"
+                )
             if (
                 isinstance(node.func, ast.Attribute)
                 and isinstance(node.func.value, ast.Name)
@@ -87,7 +105,7 @@ class StaticSafetyTests(unittest.TestCase):
                 and node.func.attr == "system"
             ):
                 violations.append("os.system")
-            if name == "run":
+            if name in {"run", "Popen"}:
                 shell_true = any(
                     keyword.arg == "shell"
                     and isinstance(keyword.value, ast.Constant)
@@ -95,17 +113,27 @@ class StaticSafetyTests(unittest.TestCase):
                     for keyword in node.keywords
                 )
                 if shell_true:
-                    violations.append("subprocess.run(shell=True)")
+                    violations.append(f"subprocess.{name}(shell=True)")
         self.assertEqual([], violations)
 
-    def test_subprocess_calls_are_timed_and_commands_are_read_only(self) -> None:
+    def test_popen_is_bounded_sanitized_and_commands_are_read_only(self) -> None:
         violations = []
         for node in ast.walk(self.tree):
             if not isinstance(node, ast.Call):
                 continue
             if call_name(node) == "run" and isinstance(node.func, ast.Attribute):
-                if not any(keyword.arg == "timeout" for keyword in node.keywords):
-                    violations.append("subprocess.run without timeout")
+                violations.append("subprocess.run is not byte bounded")
+            if call_name(node) == "Popen":
+                keywords = {keyword.arg: keyword.value for keyword in node.keywords}
+                for required in ("stdout", "stderr", "cwd", "env", "shell"):
+                    if required not in keywords:
+                        violations.append(f"Popen without {required}")
+                shell = keywords.get("shell")
+                if not (
+                    isinstance(shell, ast.Constant)
+                    and shell.value is False
+                ):
+                    violations.append("Popen shell is not explicitly false")
             command_text = " ".join(literal_strings(node)).lower()
             for fragment in DESTRUCTIVE_FRAGMENTS:
                 if fragment in command_text:
@@ -114,6 +142,9 @@ class StaticSafetyTests(unittest.TestCase):
             for command in PACKAGE_MANAGER_COMMANDS:
                 if command in words:
                     violations.append(command)
+        for constant in ("MAX_COMMAND_TIMEOUT_SECONDS", "MAX_COMMAND_OUTPUT_BYTES"):
+            if constant not in self.source:
+                violations.append(f"missing {constant}")
         self.assertEqual([], violations)
 
     def test_serialized_output_does_not_contain_sensitive_keys(self) -> None:
