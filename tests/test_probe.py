@@ -71,6 +71,10 @@ class LinuxParserTests(unittest.TestCase):
             probe.parse_linux_cpu_stat("cpu  100 0 50 850 0 0 0 0 0 0\n"),
         )
 
+    def test_parse_linux_cpu_stat_does_not_double_count_guest_ticks(self) -> None:
+        text = (FIXTURES / "linux-proc-stat-guests.txt").read_text(encoding="utf-8")
+        self.assertEqual((1040, 855), probe.parse_linux_cpu_stat(text))
+
     def test_calculate_cpu_percent_uses_tick_deltas(self) -> None:
         self.assertEqual(50.0, probe.calculate_cpu_percent((1000, 850), (1100, 900)))
 
@@ -140,8 +144,58 @@ class RecommendationTests(unittest.TestCase):
         )
         self.assertEqual(4, result["profiles"]["balanced"]["max_workers"])
 
+    def test_memory_cap_applies_below_but_not_at_25_percent(self) -> None:
+        below = probe.build_recommendation(
+            {"logical_cpus": 8, "utilization_percent": 20.0},
+            {"total_bytes": 10_000, "available_bytes": 2_499},
+        )
+        boundary = probe.build_recommendation(
+            {"logical_cpus": 8, "utilization_percent": 20.0},
+            {"total_bytes": 10_000, "available_bytes": 2_500},
+        )
+        self.assertEqual(
+            {1}, {item["max_workers"] for item in below["profiles"].values()}
+        )
+        self.assertEqual(7, boundary["profiles"]["balanced"]["max_workers"])
+
+    def test_balanced_cap_applies_at_75_but_not_just_below(self) -> None:
+        below = probe.build_recommendation(
+            {"logical_cpus": 8, "utilization_percent": 74.9},
+            {"total_bytes": 100, "available_bytes": 80},
+        )
+        boundary = probe.build_recommendation(
+            {"logical_cpus": 8, "utilization_percent": 75.0},
+            {"total_bytes": 100, "available_bytes": 80},
+        )
+        self.assertEqual(7, below["profiles"]["balanced"]["max_workers"])
+        self.assertEqual(4, boundary["profiles"]["balanced"]["max_workers"])
+
+    def test_all_profile_cap_applies_at_90_but_not_just_below(self) -> None:
+        below = probe.build_recommendation(
+            {"logical_cpus": 8, "utilization_percent": 89.9},
+            {"total_bytes": 100, "available_bytes": 80},
+        )
+        boundary = probe.build_recommendation(
+            {"logical_cpus": 8, "utilization_percent": 90.0},
+            {"total_bytes": 100, "available_bytes": 80},
+        )
+        self.assertEqual(6, below["profiles"]["low-impact"]["max_workers"])
+        self.assertEqual(4, below["profiles"]["balanced"]["max_workers"])
+        self.assertEqual(7, below["profiles"]["throughput"]["max_workers"])
+        self.assertEqual(
+            {1}, {item["max_workers"] for item in boundary["profiles"].values()}
+        )
+
 
 class SnapshotTests(unittest.TestCase):
+    def test_collect_snapshot_rejects_invalid_programmatic_sample_seconds(
+        self,
+    ) -> None:
+        for value in (0, 10.1, float("nan"), float("inf"), "not-a-number", None):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    probe.collect_snapshot(sample_seconds=value)
+
     def test_collect_snapshot_has_exact_stable_top_level_schema(self) -> None:
         with (
             mock.patch.object(
@@ -198,6 +252,42 @@ class SnapshotTests(unittest.TestCase):
                 "reason": "access denied",
             },
             snapshot["unavailable"],
+        )
+
+    def test_disk_collector_failure_marks_all_disk_byte_metrics_unavailable(
+        self,
+    ) -> None:
+        with (
+            mock.patch.object(
+                probe,
+                "_collect_cpu",
+                return_value={"logical_cpus": 8, "utilization_percent": 20.0},
+            ),
+            mock.patch.object(
+                probe,
+                "_collect_memory",
+                return_value={"total_bytes": 100, "available_bytes": 50},
+            ),
+            mock.patch.object(
+                probe, "_collect_disk", side_effect=PermissionError("disk denied")
+            ),
+            mock.patch.object(probe, "_collect_gpu", return_value={"devices": []}),
+            mock.patch.object(probe.platform, "system", return_value="Linux"),
+        ):
+            snapshot = probe.collect_snapshot(sample_seconds=0.1)
+
+        disk_errors = {
+            item["metric"]: item["reason"]
+            for item in snapshot["unavailable"]
+            if item["metric"].startswith("disk.")
+        }
+        self.assertEqual(
+            {
+                "disk.total_bytes": "disk denied",
+                "disk.used_bytes": "disk denied",
+                "disk.free_bytes": "disk denied",
+            },
+            disk_errors,
         )
 
 

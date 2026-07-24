@@ -68,7 +68,7 @@ def parse_linux_cpu_stat(text: str) -> tuple[int, int]:
         raise ValueError("aggregate CPU row contains a negative value")
 
     idle_ticks = ticks[3] + (ticks[4] if len(ticks) > 4 else 0)
-    return sum(ticks), idle_ticks
+    return sum(ticks[:8]), idle_ticks
 
 
 def calculate_cpu_percent(
@@ -255,6 +255,7 @@ def collect_snapshot(
     working_directory: str | None = None,
 ) -> dict[str, object]:
     """Collect a stable snapshot while degrading failures per metric."""
+    validated_sample_seconds = validate_sample_seconds(str(sample_seconds))
     system = platform.system()
     if system not in SUPPORTED_PLATFORMS:
         raise ValueError(f"unsupported platform: {system or 'unknown'}")
@@ -262,7 +263,7 @@ def collect_snapshot(
     unavailable: list[dict[str, str]] = []
     cpu = _collect_degraded(
         _collect_cpu,
-        (system, sample_seconds),
+        (system, validated_sample_seconds),
         "cpu.utilization_percent",
         unavailable,
         {},
@@ -334,6 +335,20 @@ def collect_snapshot(
                 f"Memory collection for {system} is not implemented in the core probe.",
             )
         )
+    disk_failure_reason = next(
+        (
+            item["reason"]
+            for item in unavailable
+            if item["metric"] == "disk.free_bytes"
+        ),
+        "Disk collector did not return a value.",
+    )
+    for disk_field in ("total_bytes", "used_bytes", "free_bytes"):
+        metric = f"disk.{disk_field}"
+        if disk_field not in disk and not any(
+            item["metric"] == metric for item in unavailable
+        ):
+            unavailable.append(_unavailable(metric, disk_failure_reason))
     if not gpu.get("devices") and not any(
         item["metric"] == "gpu.devices" for item in unavailable
     ):
