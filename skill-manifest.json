@@ -7,7 +7,7 @@
     },
     {
       "path": "scripts/resource_probe.py",
-      "sha256": "b88603cb066de27a0e4e9e0505439b9bc516127b849351132184cbfbeb33d682"
+      "sha256": "84ffcb48f112abf8ff338a8c12fe241dcde6481c2b49d0196e4e34c2c2315306"
     },
     {
       "path": "evals/evals.json",
