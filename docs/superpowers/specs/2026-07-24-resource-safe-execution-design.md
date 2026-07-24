@@ -185,7 +185,11 @@ usernames, file contents, access tokens, or network destinations.
 - Windows: use documented PowerShell/CIM and NVIDIA interfaces. Obtain trusted
   roots from native Windows APIs, ignore inherited PATH and mutable root
   variables, reject reparse/current-token-writable trusted components, and
-  pass only validated SystemRoot, WINDIR, and ProgramFiles values.
+  pass only validated SystemRoot, WINDIR, and ProgramFiles values. Pin
+  `PSModulePath` to validated System32 and Program Files module directories so
+  PowerShell cannot reconstruct a current-user module root. Treat only
+  `ERROR_ACCESS_DENIED` and `ERROR_PRIVILEGE_NOT_HELD` as definitive denial of
+  a requested dangerous right; sharing and transient errors fail closed.
 - macOS: use `sysctl`, `vm_stat`, `ps`, `df`, `pmset`, and
   `system_profiler -json` when available. Treat Apple Silicon memory as shared
   rather than adding CPU and GPU memory together.
@@ -194,13 +198,17 @@ usernames, file contents, access tokens, or network destinations.
   non-group/other-writable, and free of a detectable ACL/current-user write
   grant.
 
-All command adapters use `shell=False`, anonymous temporary output capture, a
-five-second execution deadline, a fixed 0.25-second cleanup grace, and a
-one-MiB retained-output bound. Descendant-held standard handles cannot extend
-the call. A timeout or overflow may stop the owned Windows child handle or the
-new POSIX process group. The resolver protects against unprivileged project,
-PATH, environment, and ACL shadowing; privileged system-directory mutation is
-outside this threat boundary.
+All command adapters use `shell=False`, main-thread nonblocking or peeked
+operating-system pipes, a five-second execution deadline, and a fixed
+0.25-second cleanup grace. They use no reader threads or backing files and
+retain at most one MiB of retained captured bytes plus
+operating-system-bounded pipe buffers. This does not bound the total bytes a
+child may attempt to write; the first observed byte over the retained limit is
+an overflow. Descendant-held standard handles cannot extend the call. A
+timeout or overflow may stop the owned Windows child handle or the new POSIX
+process group. The resolver protects against unprivileged project, PATH,
+environment, module, and ACL shadowing; privileged system-directory mutation
+is outside this threat boundary.
 
 Missing or restricted commands will degrade individual metrics, not fail the
 entire probe. An unsupported platform returns a clear nonzero exit status and

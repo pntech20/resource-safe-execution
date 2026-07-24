@@ -591,11 +591,36 @@ class CommandTests(unittest.TestCase):
             stderr: bytes = b"",
             running: bool = False,
         ) -> None:
-            self.stdout = io.BytesIO(stdout)
-            self.stderr = io.BytesIO(stderr)
+            self.stdout: object | None = None
+            self.stderr: object | None = None
             self.returncode = None if running else 0
             self.killed = False
             self.waited = False
+            self.attach_output(stdout, stderr)
+
+        def attach_output(
+            self,
+            stdout: bytes = b"",
+            stderr: bytes = b"",
+        ) -> None:
+            for channel, data in (
+                ("stdout", stdout),
+                ("stderr", stderr),
+            ):
+                existing = getattr(self, channel)
+                if existing is not None:
+                    existing.close()
+                read_descriptor, write_descriptor = os.pipe()
+                try:
+                    if data:
+                        os.write(write_descriptor, data)
+                finally:
+                    os.close(write_descriptor)
+                setattr(
+                    self,
+                    channel,
+                    os.fdopen(read_descriptor, "rb", buffering=0),
+                )
 
         def poll(self) -> int | None:
             return self.returncode
@@ -688,11 +713,8 @@ class CommandTests(unittest.TestCase):
         sinks: list[object] = []
 
         def start_child(*args: object, **kwargs: object) -> object:
-            stdout = kwargs["stdout"]
-            stderr = kwargs["stderr"]
-            stdout.write(b"ok")
-            stdout.flush()
-            sinks.extend((stdout, stderr))
+            child.attach_output(stdout=b"ok")
+            sinks.extend((child.stdout, child.stderr))
             return child
 
         with (
@@ -740,13 +762,31 @@ class CommandTests(unittest.TestCase):
         self,
     ) -> None:
         native_windows = Path("/native/windows")
+        native_system = native_windows / "System32"
         native_program_files = Path("/native/program-files")
+        system_modules = (
+            native_system
+            / "WindowsPowerShell"
+            / "v1.0"
+            / "Modules"
+        )
+        program_files_modules = (
+            native_program_files
+            / "WindowsPowerShell"
+            / "Modules"
+        )
         with (
             mock.patch.object(probe.platform, "system", return_value="Windows"),
             mock.patch.object(
                 probe,
                 "_windows_directory",
                 return_value=native_windows,
+                create=True,
+            ),
+            mock.patch.object(
+                probe,
+                "_windows_system_directory",
+                return_value=native_system,
                 create=True,
             ),
             mock.patch.object(
@@ -769,6 +809,7 @@ class CommandTests(unittest.TestCase):
                     "ProgramFiles": "/spoof/program-files",
                     "PATH": "/spoof/path",
                     "CUDA_PATH": "/spoof/cuda",
+                    "PSModulePath": "/spoof/modules",
                 },
                 clear=True,
             ),
@@ -780,9 +821,148 @@ class CommandTests(unittest.TestCase):
                 "SystemRoot": str(native_windows),
                 "WINDIR": str(native_windows),
                 "ProgramFiles": str(native_program_files),
+                "PSModulePath": (
+                    f"{system_modules};{program_files_modules}"
+                ),
             },
             environment,
         )
+        self.assertNotIn("/spoof/modules", environment["PSModulePath"])
+
+    def test_windows_environment_rejects_untrusted_all_users_modules(
+        self,
+    ) -> None:
+        native_windows = Path("/native/windows")
+        native_system = native_windows / "System32"
+        native_program_files = Path("/native/program-files")
+        program_files_modules = (
+            native_program_files
+            / "WindowsPowerShell"
+            / "Modules"
+        )
+
+        def secure_path(
+            candidate: Path,
+            *args: object,
+            **kwargs: object,
+        ) -> bool:
+            return candidate != program_files_modules
+
+        with (
+            mock.patch.object(probe.platform, "system", return_value="Windows"),
+            mock.patch.object(
+                probe,
+                "_windows_directory",
+                return_value=native_windows,
+            ),
+            mock.patch.object(
+                probe,
+                "_windows_system_directory",
+                return_value=native_system,
+            ),
+            mock.patch.object(
+                probe,
+                "_windows_program_files_directory",
+                return_value=native_program_files,
+            ),
+            mock.patch.object(
+                probe,
+                "_windows_path_is_secure",
+                side_effect=secure_path,
+            ),
+        ):
+            with self.assertRaisesRegex(
+                OSError,
+                "PowerShell modules",
+            ):
+                probe._sanitized_environment()
+
+    @unittest.skipUnless(
+        os.name == "nt",
+        "requires Windows PowerShell module auto-loading",
+    )
+    def test_windows_user_module_shadow_is_not_auto_loaded(self) -> None:
+        powershell = probe.resolve_trusted_executable(
+            "powershell.exe",
+            system="Windows",
+        )
+        documents_result = subprocess.run(
+            [
+                os.fspath(powershell),
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "[Environment]::GetFolderPath('MyDocuments')",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        documents = Path(documents_result.stdout.strip())
+        if documents_result.returncode != 0 or not documents.is_absolute():
+            self.skipTest("current-user Documents directory is unavailable")
+
+        module_root = (
+            documents
+            / "WindowsPowerShell"
+            / "Modules"
+        )
+        fixture = module_root / "ResourceProbeShadowFixture"
+        if fixture.exists():
+            self.skipTest("shadow fixture path already exists")
+
+        created_parents: list[Path] = []
+        current = module_root
+        while not current.exists() and current != documents:
+            created_parents.append(current)
+            current = current.parent
+
+        try:
+            fixture.mkdir(parents=True)
+            (fixture / "ResourceProbeShadowFixture.psd1").write_text(
+                "@{\n"
+                "RootModule='ResourceProbeShadowFixture.psm1'\n"
+                "ModuleVersion='1.0.0'\n"
+                "GUID='cb7ab8f9-df51-412a-8adb-d13f82f275a5'\n"
+                "FunctionsToExport=@('Get-ResourceProbeShadowFixture')\n"
+                "CmdletsToExport=@()\n"
+                "AliasesToExport=@()\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            (fixture / "ResourceProbeShadowFixture.psm1").write_text(
+                "function Get-ResourceProbeShadowFixture {\n"
+                "    'USER-MODULE-SHADOWED'\n"
+                "}\n",
+                encoding="utf-8",
+            )
+
+            result = probe.run_command(
+                [
+                    os.fspath(powershell),
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    "$ErrorActionPreference = 'SilentlyContinue'; "
+                    "Import-Module ResourceProbeShadowFixture; "
+                    "if ($null -eq "
+                    "(Get-Module ResourceProbeShadowFixture)) { "
+                    "'SYSTEM-MODULES-ONLY' "
+                    "} else { Get-ResourceProbeShadowFixture }",
+                ],
+                timeout_seconds=5.0,
+            )
+        finally:
+            shutil.rmtree(fixture, ignore_errors=True)
+            for created in created_parents:
+                try:
+                    created.rmdir()
+                except OSError:
+                    pass
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("SYSTEM-MODULES-ONLY", result.stdout.strip())
 
     def test_output_overflow_kills_only_owned_child_and_caps_capture(
         self,
@@ -795,30 +975,91 @@ class CommandTests(unittest.TestCase):
         sinks: list[object] = []
 
         def start_child(*args: object, **kwargs: object) -> object:
-            stdout = kwargs["stdout"]
-            stderr = kwargs["stderr"]
-            stdout.write(b"x" * 700_000)
-            stderr.write(b"y" * 400_000)
-            stdout.flush()
-            stderr.flush()
-            sinks.extend((stdout, stderr))
+            child.attach_output(
+                stdout=b"x" * 7,
+                stderr=b"y" * 4,
+            )
+            sinks.extend((child.stdout, child.stderr))
             return child
 
-        with mock.patch.object(
-            probe.subprocess,
-            "Popen",
-            side_effect=start_child,
+        with (
+            mock.patch.object(
+                probe.subprocess,
+                "Popen",
+                side_effect=start_child,
+            ),
+            mock.patch.object(
+                probe,
+                "MAX_COMMAND_OUTPUT_BYTES",
+                8,
+            ),
         ):
             with self.assertRaises(error_type) as caught:
                 probe.run_command([sys.executable, "-V"])
 
         self.assertLessEqual(
             caught.exception.captured_bytes,
-            output_limit,
+            8,
         )
         self.assertTrue(child.killed)
         self.assertTrue(child.waited)
         self.assertTrue(all(sink.closed for sink in sinks))
+
+    def test_bounded_output_never_retains_more_than_combined_limit(
+        self,
+    ) -> None:
+        capture_type = getattr(probe, "_BoundedOutput", None)
+        self.assertIsNotNone(capture_type)
+        capture = capture_type(8)
+
+        capture.append("stdout", b"123456")
+        capture.append("stderr", b"abcdef")
+
+        self.assertEqual(8, capture.retained_bytes)
+        self.assertEqual(b"123456", capture.stdout_bytes)
+        self.assertEqual(b"ab", capture.stderr_bytes)
+        self.assertTrue(capture.overflowed)
+
+    def test_high_throughput_dual_stream_output_uses_bounded_pipes(
+        self,
+    ) -> None:
+        output_limit = 65_536
+        child_code = (
+            "import os;"
+            "chunk=b'x'*8192;"
+            "[(os.write(1,chunk),os.write(2,chunk)) "
+            "for _ in range(4096)]"
+        )
+        started = time.monotonic()
+        with (
+            mock.patch.object(
+                probe,
+                "MAX_COMMAND_OUTPUT_BYTES",
+                output_limit,
+            ),
+            mock.patch.object(
+                tempfile,
+                "TemporaryFile",
+                side_effect=AssertionError(
+                    "disk-backed capture is forbidden"
+                ),
+            ),
+        ):
+            with self.assertRaises(
+                probe.CommandOutputLimitError
+            ) as caught:
+                probe.run_command(
+                    [sys.executable, "-c", child_code],
+                    timeout_seconds=2.0,
+                )
+        elapsed = time.monotonic() - started
+
+        self.assertEqual(output_limit, caught.exception.captured_bytes)
+        self.assertLess(
+            elapsed,
+            2.0 + probe.COMMAND_CLEANUP_GRACE_SECONDS + 0.5,
+            f"output handling exceeded its deadline: {elapsed:.3f}s",
+        )
 
     def test_real_oversized_child_is_stopped_at_combined_byte_limit(self) -> None:
         with self.assertRaises(probe.CommandOutputLimitError) as caught:
@@ -845,7 +1086,7 @@ class CommandTests(unittest.TestCase):
         sinks: list[object] = []
 
         def start_child(*args: object, **kwargs: object) -> object:
-            sinks.extend((kwargs["stdout"], kwargs["stderr"]))
+            sinks.extend((child.stdout, child.stderr))
             return child
 
         with mock.patch.object(
@@ -1088,6 +1329,106 @@ class CommandTests(unittest.TestCase):
             self.assertFalse(
                 probe._windows_path_is_secure(candidate, trusted_root)
             )
+
+    def test_windows_access_check_accepts_only_definitive_denials(self) -> None:
+        invalid_handle = probe.ctypes.c_void_p(-1).value
+        for error_code in (5, 1314):
+            create_file = mock.Mock(return_value=invalid_handle)
+            close_handle = mock.Mock(return_value=1)
+            kernel32 = SimpleNamespace(
+                CreateFileW=create_file,
+                CloseHandle=close_handle,
+            )
+            with (
+                self.subTest(error_code=error_code),
+                mock.patch.object(
+                    probe.platform,
+                    "system",
+                    return_value="Windows",
+                ),
+                mock.patch.object(
+                    probe.ctypes,
+                    "WinDLL",
+                    return_value=kernel32,
+                    create=True,
+                ),
+                mock.patch.object(
+                    probe.ctypes,
+                    "set_last_error",
+                    create=True,
+                ),
+                mock.patch.object(
+                    probe.ctypes,
+                    "get_last_error",
+                    return_value=error_code,
+                    create=True,
+                ),
+            ):
+                self.assertFalse(
+                    probe._windows_current_user_can_write(
+                        Path("C:/Windows"),
+                        directory=True,
+                    )
+                )
+            self.assertEqual(6, create_file.call_count)
+            close_handle.assert_not_called()
+
+    def test_windows_access_check_rejects_indeterminate_api_errors(self) -> None:
+        invalid_handle = probe.ctypes.c_void_p(-1).value
+        for error_code in (0, 2, 32, 33):
+            create_file = mock.Mock(return_value=invalid_handle)
+            kernel32 = SimpleNamespace(
+                CreateFileW=create_file,
+                CloseHandle=mock.Mock(return_value=1),
+            )
+            with (
+                self.subTest(error_code=error_code),
+                mock.patch.object(
+                    probe.platform,
+                    "system",
+                    return_value="Windows",
+                ),
+                mock.patch.object(
+                    probe.ctypes,
+                    "WinDLL",
+                    return_value=kernel32,
+                    create=True,
+                ),
+                mock.patch.object(
+                    probe.ctypes,
+                    "set_last_error",
+                    create=True,
+                ),
+                mock.patch.object(
+                    probe.ctypes,
+                    "get_last_error",
+                    return_value=error_code,
+                    create=True,
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    OSError,
+                    "indeterminate",
+                ):
+                    probe._windows_current_user_can_write(
+                        Path("C:/Windows"),
+                        directory=True,
+                    )
+
+    @unittest.skipUnless(
+        os.name == "nt",
+        "requires live Windows trust-root checks",
+    )
+    def test_windows_native_system_directory_is_secure_live(self) -> None:
+        windows_directory = probe._windows_directory()
+        system_directory = probe._windows_system_directory()
+        self.assertTrue(
+            probe._windows_path_is_secure(
+                system_directory,
+                windows_directory,
+                expect_file=False,
+            )
+        )
 
     @unittest.skipUnless(
         os.name == "nt",

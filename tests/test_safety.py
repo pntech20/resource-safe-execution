@@ -180,6 +180,22 @@ class StaticSafetyTests(unittest.TestCase):
         self.assertIn("COMMAND_CLEANUP_GRACE_SECONDS", self.source)
         self.assertNotIn("reader.join", self.source)
 
+    def test_command_capture_uses_bounded_pipes_without_backing_files(
+        self,
+    ) -> None:
+        self.assertIn("subprocess.PIPE", self.source)
+        self.assertIn("PeekNamedPipe", self.source)
+        self.assertIn("_BoundedOutput", self.source)
+        self.assertNotIn("TemporaryFile", self.source)
+        self.assertNotIn("threading", self.source)
+
+    def test_windows_powershell_module_path_is_pinned_not_inherited(
+        self,
+    ) -> None:
+        self.assertIn('environment["PSModulePath"]', self.source)
+        self.assertNotIn('os.environ.get("PSModulePath")', self.source)
+        self.assertNotIn('os.getenv("PSModulePath")', self.source)
+
 
 if __name__ == "__main__":
     unittest.main()

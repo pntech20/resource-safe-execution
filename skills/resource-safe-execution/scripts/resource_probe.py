@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import ctypes
+import errno
 import json
 import math
 import os
@@ -16,12 +17,11 @@ import shutil
 import stat
 import subprocess
 import sys
-import tempfile
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import BinaryIO, Callable, Sequence
 
 
 SCHEMA_VERSION = "1.0"
@@ -31,6 +31,15 @@ MAX_SAMPLE_SECONDS = 10.0
 MAX_COMMAND_TIMEOUT_SECONDS = 5.0
 MAX_COMMAND_OUTPUT_BYTES = 1_048_576
 COMMAND_CLEANUP_GRACE_SECONDS = 0.25
+COMMAND_PIPE_READ_BYTES = 65_536
+WINDOWS_DEFINITIVE_ACCESS_DENIALS = {
+    5,  # ERROR_ACCESS_DENIED
+    1314,  # ERROR_PRIVILEGE_NOT_HELD
+}
+WINDOWS_PIPE_CLOSED_ERRORS = {
+    109,  # ERROR_BROKEN_PIPE
+    233,  # ERROR_PIPE_NOT_CONNECTED
+}
 SUPPORTED_PLATFORMS = {"Linux", "Darwin", "Windows"}
 POSIX_TRUSTED_DIRECTORIES = (
     Path("/bin"),
@@ -72,6 +81,47 @@ class CommandOutputLimitError(RuntimeError):
 
 class CommandStartError(RuntimeError):
     """The diagnostic child could not be started without exposing its path."""
+
+
+class _BoundedOutput:
+    """Retain at most one combined byte limit across stdout and stderr."""
+
+    def __init__(self, limit: int) -> None:
+        if limit < 0:
+            raise ValueError("output limit cannot be negative")
+        self._limit = limit
+        self._stdout = bytearray()
+        self._stderr = bytearray()
+        self.overflowed = False
+
+    @property
+    def retained_bytes(self) -> int:
+        return len(self._stdout) + len(self._stderr)
+
+    @property
+    def stdout_bytes(self) -> bytes:
+        return bytes(self._stdout)
+
+    @property
+    def stderr_bytes(self) -> bytes:
+        return bytes(self._stderr)
+
+    @property
+    def next_read_size(self) -> int:
+        remaining = self._limit - self.retained_bytes
+        return max(1, min(COMMAND_PIPE_READ_BYTES, remaining + 1))
+
+    def append(self, channel: str, data: bytes) -> None:
+        if channel not in {"stdout", "stderr"}:
+            raise ValueError("unknown output channel")
+        remaining = self._limit - self.retained_bytes
+        retained = data[:remaining]
+        if channel == "stdout":
+            self._stdout.extend(retained)
+        else:
+            self._stderr.extend(retained)
+        if len(data) > remaining:
+            self.overflowed = True
 
 
 def _windows_native_directory(api_name: str) -> Path:
@@ -184,6 +234,7 @@ def _windows_current_user_can_write(path: Path, *, directory: bool) -> bool:
         )
 
     for desired_access in dangerous_rights:
+        ctypes.set_last_error(0)
         handle = create_file(
             str(path),
             desired_access,
@@ -196,6 +247,12 @@ def _windows_current_user_can_write(path: Path, *, directory: bool) -> bool:
         if handle not in (None, invalid_handle):
             close_handle(handle)
             return True
+        error_code = int(ctypes.get_last_error())
+        if error_code not in WINDOWS_DEFINITIVE_ACCESS_DENIALS:
+            raise OSError(
+                error_code,
+                "Windows access check was indeterminate",
+            )
     return False
 
 
@@ -429,21 +486,149 @@ def _sanitized_environment() -> dict[str, str]:
             raise OSError("trusted Windows directory is unavailable")
         environment["SystemRoot"] = str(windows_directory)
         environment["WINDIR"] = str(windows_directory)
+        system_directory = _windows_system_directory()
+        system_modules = (
+            system_directory
+            / "WindowsPowerShell"
+            / "v1.0"
+            / "Modules"
+        )
+        if not _windows_path_is_secure(
+            system_modules,
+            windows_directory,
+            expect_file=False,
+        ):
+            raise OSError(
+                "trusted Windows PowerShell modules are unavailable"
+            )
+        module_directories = [system_modules]
         try:
             program_files = _windows_program_files_directory()
-        except OSError:
-            pass
-        else:
-            if _windows_path_is_secure(
-                program_files,
-                program_files,
-                expect_file=False,
-            ):
-                environment["ProgramFiles"] = str(program_files)
+        except OSError as exc:
+            raise OSError(
+                "trusted Windows PowerShell modules are unavailable"
+            ) from exc
+        if not _windows_path_is_secure(
+            program_files,
+            program_files,
+            expect_file=False,
+        ):
+            raise OSError(
+                "trusted Windows PowerShell modules are unavailable"
+            )
+        program_files_modules = (
+            program_files
+            / "WindowsPowerShell"
+            / "Modules"
+        )
+        if not _windows_path_is_secure(
+            program_files_modules,
+            program_files,
+            expect_file=False,
+        ):
+            raise OSError(
+                "trusted Windows PowerShell modules are unavailable"
+            )
+        environment["ProgramFiles"] = str(program_files)
+        module_directories.append(program_files_modules)
+        environment["PSModulePath"] = ";".join(
+            str(directory) for directory in module_directories
+        )
     else:
         environment["LANG"] = "C"
         environment["LC_ALL"] = "C"
     return environment
+
+
+def _configure_pipe_reader(stream: BinaryIO, selected_system: str) -> None:
+    if selected_system not in {"Linux", "Darwin"}:
+        return
+    import fcntl
+
+    descriptor = stream.fileno()
+    flags = int(fcntl.fcntl(descriptor, fcntl.F_GETFL))
+    fcntl.fcntl(descriptor, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+
+
+def _windows_pipe_available(stream: BinaryIO) -> int:
+    import msvcrt
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    peek_named_pipe = kernel32.PeekNamedPipe
+    peek_named_pipe.argtypes = (
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_uint32),
+        ctypes.c_void_p,
+    )
+    peek_named_pipe.restype = ctypes.c_int
+    available = ctypes.c_uint32(0)
+    ctypes.set_last_error(0)
+    succeeded = int(
+        peek_named_pipe(
+            ctypes.c_void_p(msvcrt.get_osfhandle(stream.fileno())),
+            None,
+            0,
+            None,
+            ctypes.byref(available),
+            None,
+        )
+    )
+    if succeeded:
+        return int(available.value)
+    error_code = int(ctypes.get_last_error())
+    if error_code in WINDOWS_PIPE_CLOSED_ERRORS:
+        return 0
+    raise OSError(
+        error_code,
+        "Windows diagnostic pipe state was indeterminate",
+    )
+
+
+def _read_available_pipe(
+    stream: BinaryIO,
+    selected_system: str,
+    maximum_bytes: int,
+) -> bytes:
+    descriptor = stream.fileno()
+    if selected_system == "Windows":
+        available = _windows_pipe_available(stream)
+        if available == 0:
+            return b""
+        maximum_bytes = min(maximum_bytes, available)
+    try:
+        return os.read(descriptor, maximum_bytes)
+    except BlockingIOError:
+        return b""
+    except OSError as exc:
+        if exc.errno in {errno.EAGAIN, errno.EWOULDBLOCK}:
+            return b""
+        raise
+
+
+def _drain_available_output(
+    process: subprocess.Popen[bytes],
+    capture: _BoundedOutput,
+    selected_system: str,
+) -> None:
+    streams = (
+        ("stdout", process.stdout),
+        ("stderr", process.stderr),
+    )
+    for channel, stream in streams:
+        if stream is None:
+            raise OSError("diagnostic pipe is unavailable")
+        while not capture.overflowed:
+            data = _read_available_pipe(
+                stream,
+                selected_system,
+                capture.next_read_size,
+            )
+            if not data:
+                break
+            capture.append(channel, data)
 
 
 def run_command(
@@ -470,55 +655,74 @@ def run_command(
     started = time.monotonic()
     deadline = started + validated_timeout
     selected_system = platform.system()
-    with (
-        tempfile.TemporaryFile(mode="w+b") as stdout_capture,
-        tempfile.TemporaryFile(mode="w+b") as stderr_capture,
-    ):
-        popen_options: dict[str, object] = {}
-        if selected_system in {"Linux", "Darwin"}:
-            popen_options["start_new_session"] = True
-        elif selected_system == "Windows":
-            popen_options["creationflags"] = int(
-                getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-            )
-        try:
-            process = subprocess.Popen(
-                command,
-                stdin=subprocess.DEVNULL,
-                stdout=stdout_capture,
-                stderr=stderr_capture,
-                cwd=os.fspath(_trusted_working_directory()),
-                env=_sanitized_environment(),
-                shell=False,
-                **popen_options,
-            )
-        except PermissionError:
-            raise CommandStartError(
-                "diagnostic child permission denied"
-            ) from None
-        except OSError:
-            raise CommandStartError(
-                "diagnostic child could not be started"
-            ) from None
+    popen_options: dict[str, object] = {}
+    if selected_system in {"Linux", "Darwin"}:
+        popen_options["start_new_session"] = True
+    elif selected_system == "Windows":
+        popen_options["creationflags"] = int(
+            getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        )
+    try:
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=0,
+            cwd=os.fspath(_trusted_working_directory()),
+            env=_sanitized_environment(),
+            shell=False,
+            **popen_options,
+        )
+    except PermissionError:
+        raise CommandStartError(
+            "diagnostic child permission denied"
+        ) from None
+    except OSError:
+        raise CommandStartError(
+            "diagnostic child could not be started"
+        ) from None
 
-        breach: str | None = None
-        returncode: int | None = None
-        while True:
-            captured_size = (
-                os.fstat(stdout_capture.fileno()).st_size
-                + os.fstat(stderr_capture.fileno()).st_size
-            )
-            if captured_size > MAX_COMMAND_OUTPUT_BYTES:
-                breach = "overflow"
-                break
-            returncode = process.poll()
-            if returncode is not None:
-                break
-            remaining_seconds = deadline - time.monotonic()
-            if remaining_seconds <= 0:
-                breach = "timeout"
-                break
-            time.sleep(min(0.01, remaining_seconds))
+    capture = _BoundedOutput(MAX_COMMAND_OUTPUT_BYTES)
+    breach: str | None = None
+    returncode: int | None = None
+    streams = tuple(
+        stream
+        for stream in (process.stdout, process.stderr)
+        if stream is not None
+    )
+    try:
+        try:
+            if process.stdout is None or process.stderr is None:
+                raise OSError("diagnostic pipe is unavailable")
+            _configure_pipe_reader(process.stdout, selected_system)
+            _configure_pipe_reader(process.stderr, selected_system)
+            while True:
+                _drain_available_output(
+                    process,
+                    capture,
+                    selected_system,
+                )
+                if capture.overflowed:
+                    breach = "overflow"
+                    break
+                returncode = process.poll()
+                if returncode is not None:
+                    _drain_available_output(
+                        process,
+                        capture,
+                        selected_system,
+                    )
+                    if capture.overflowed:
+                        breach = "overflow"
+                    break
+                remaining_seconds = deadline - time.monotonic()
+                if remaining_seconds <= 0:
+                    breach = "timeout"
+                    break
+                time.sleep(min(0.01, remaining_seconds))
+        except OSError:
+            breach = "capture"
 
         if breach is not None and process.poll() is None:
             if selected_system in {"Linux", "Darwin"} and hasattr(
@@ -535,7 +739,10 @@ def run_command(
             else:
                 process.kill()
 
-            cleanup_deadline = deadline + COMMAND_CLEANUP_GRACE_SECONDS
+            cleanup_deadline = (
+                min(deadline, time.monotonic())
+                + COMMAND_CLEANUP_GRACE_SECONDS
+            )
             cleanup_remaining = max(
                 0.0,
                 cleanup_deadline - time.monotonic(),
@@ -544,44 +751,33 @@ def run_command(
                 returncode = process.wait(timeout=cleanup_remaining)
             except subprocess.TimeoutExpired:
                 returncode = process.poll()
+    finally:
+        for stream in streams:
+            stream.close()
 
-        stdout_size = os.fstat(stdout_capture.fileno()).st_size
-        stderr_size = os.fstat(stderr_capture.fileno()).st_size
-        captured_bytes = min(
-            MAX_COMMAND_OUTPUT_BYTES,
-            stdout_size + stderr_size,
+    if breach == "overflow":
+        raise CommandOutputLimitError(capture.retained_bytes)
+    if breach == "capture":
+        raise CommandStartError(
+            "diagnostic child output could not be captured"
         )
-        stdout_capture.seek(0)
-        stdout_bytes = stdout_capture.read(
-            min(stdout_size, MAX_COMMAND_OUTPUT_BYTES)
+    if breach == "timeout":
+        raise CommandTimeoutError(
+            f"diagnostic child timed out after "
+            f"{validated_timeout:g} seconds"
         )
-        remaining_bytes = MAX_COMMAND_OUTPUT_BYTES - len(stdout_bytes)
-        stderr_capture.seek(0)
-        stderr_bytes = stderr_capture.read(
-            min(stderr_size, remaining_bytes)
+    if returncode is None:
+        returncode = process.poll()
+    if returncode is None:
+        raise CommandTimeoutError(
+            f"diagnostic child exceeded its "
+            f"{validated_timeout:g}-second execution deadline"
         )
-
-        if breach == "overflow" or (
-            stdout_size + stderr_size > MAX_COMMAND_OUTPUT_BYTES
-        ):
-            raise CommandOutputLimitError(captured_bytes)
-        if breach == "timeout":
-            raise CommandTimeoutError(
-                f"diagnostic child timed out after "
-                f"{validated_timeout:g} seconds"
-            )
-        if returncode is None:
-            returncode = process.poll()
-        if returncode is None:
-            raise CommandTimeoutError(
-                f"diagnostic child exceeded its "
-                f"{validated_timeout:g}-second execution deadline"
-            )
-        return CommandResult(
-            int(returncode),
-            stdout_bytes.decode("utf-8", errors="replace"),
-            stderr_bytes.decode("utf-8", errors="replace"),
-        )
+    return CommandResult(
+        int(returncode),
+        capture.stdout_bytes.decode("utf-8", errors="replace"),
+        capture.stderr_bytes.decode("utf-8", errors="replace"),
+    )
 
 
 def parse_linux_cpu_stat(text: str) -> tuple[int, int]:

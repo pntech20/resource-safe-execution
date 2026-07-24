@@ -22,19 +22,29 @@ guidance is loaded from direct local links in the skill folder.
 The bundled runtime uses only the Python standard library. It performs no
 network access, telemetry, package installation, or privilege escalation. It
 never terminates pre-existing or unrelated processes. Diagnostic calls have a
-five-second execution deadline plus a fixed 0.25-second cleanup grace. Output
-is captured in anonymous temporary files, so descendant-held standard handles
-cannot extend the call; at most one MiB is retained. A timeout or output
-overflow is a breach. Windows then stops only the child through its owned
-process handle, while POSIX stops the new owned process group.
+five-second execution deadline plus a fixed 0.25-second cleanup grace. The
+parent drains stdout and stderr through operating-system pipes without reader
+threads or backing files, then closes them when the owned child exits. This
+keeps at most one MiB of retained captured bytes plus
+operating-system-bounded pipe buffers, so descendant-held standard handles
+cannot extend the call. It does not bound the total bytes a child may attempt
+to write; the first observed byte above the retained limit is an output
+overflow. A timeout or overflow is a breach. Windows then stops only the child
+through its owned process handle, while POSIX stops the new owned process
+group.
 
 Diagnostic executables never come from the project directory or inherited
 PATH. Native Windows APIs provide the Windows and Program Files anchors; the
 probe rejects reparse or current-token-writable trusted components and passes
-only validated SystemRoot, WINDIR, and ProgramFiles variables. POSIX candidates
-must be root-owned, executable, and beneath a root-owned ancestor chain that is
-not group/other-writable or exposed through a detectable ACL. Privileged
-system-directory mutation is outside this unprivileged-shadowing boundary.
+only validated SystemRoot, WINDIR, ProgramFiles, and system-only
+`PSModulePath` values. That module path excludes current-user PowerShell module
+roots so `Get-CimInstance` cannot auto-load a user shadow. A Windows access
+probe treats only `ERROR_ACCESS_DENIED` and `ERROR_PRIVILEGE_NOT_HELD` as
+definitive absence of a requested dangerous right; sharing and transient
+errors fail closed. POSIX candidates must be root-owned, executable, and
+beneath a root-owned ancestor chain that is not group/other-writable or
+exposed through a detectable ACL. Privileged system-directory mutation is
+outside this unprivileged-shadowing boundary.
 
 Process summaries exclude command lines, environment variables, usernames,
 file contents, tokens, and network destinations. Detection of GPU hardware is

@@ -35,8 +35,8 @@ library, `unittest`, GitHub Actions, PowerShell/CIM, macOS system tools, Linux
 - Every subprocess uses a validated absolute executable path, an argument
   list, `shell=False`, a trusted working directory, a sanitized environment, a
   five-second execution deadline, a 0.25-second cleanup grace, and a one-MiB
-  retained-output bound. Anonymous temporary capture means descendant-held
-  standard handles cannot extend the call.
+  retained-output bound. Main-thread pipe draining uses no backing files or
+  reader joins, so descendant-held standard handles cannot extend the call.
 - Windows roots come from native Windows APIs, never inherited PATH or mutable
   environment anchors. POSIX paths require a root-owned, non-group/other-
   writable canonical ancestor chain and no detectable ACL/current-user write
@@ -476,17 +476,18 @@ class CommandResult:
     stderr: str
 
 def run_command(args: Sequence[str], timeout_seconds: float = 5.0) -> CommandResult:
-    with TemporaryFile("w+b") as stdout, TemporaryFile("w+b") as stderr:
-        child = subprocess.Popen(
-            list(args),
-            stdout=stdout,
-            stderr=stderr,
-            cwd=trusted_working_directory,
-            env=sanitized_environment,
-            shell=False,
-        )
-        # Poll child identity and file sizes to one monotonic deadline.
-        # Cleanup is bounded by the deadline plus a 0.25-second grace.
+    child = subprocess.Popen(
+        list(args),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        bufsize=0,
+        cwd=trusted_working_directory,
+        env=sanitized_environment,
+        shell=False,
+    )
+    # Drain POSIX nonblocking pipes or Windows PeekNamedPipe results into
+    # one bounded in-memory capture. Never wait for a descendant-held EOF.
+    # Cleanup is bounded by the deadline plus a 0.25-second grace.
 ```
 
 `run_command` rejects non-absolute executable paths. Resolve diagnostic tools
@@ -494,7 +495,16 @@ only from explicit system-owned candidates; never consult the project
 directory or inherited `PATH`. Native Windows APIs supply validated roots and
 POSIX requires root-owned non-writable ancestors. This blocks unprivileged
 shadowing; it does not claim authenticity against privileged system-directory
-mutation.
+mutation. On Windows, pin `PSModulePath` to validated System32 and Program
+Files module directories instead of allowing current-user module discovery.
+Only `ERROR_ACCESS_DENIED` and `ERROR_PRIVILEGE_NOT_HELD` are definitive
+denials for a dangerous access request; sharing and transient errors fail
+closed.
+
+The pipe design keeps at most one MiB of retained captured bytes plus
+operating-system-bounded pipe buffers and uses no backing file or reader
+thread. This does not bound the total bytes a child may attempt to write; one
+observed byte beyond the retained limit triggers overflow cleanup.
 
 Represent every unavailable metric as:
 

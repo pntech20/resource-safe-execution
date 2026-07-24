@@ -19,20 +19,30 @@ arbitrary-parent creation through path-based Win32 APIs.
 The runtime performs no network access, telemetry, package installation, or
 privilege escalation. It never terminates pre-existing or unrelated processes.
 Each diagnostic call has at most a five-second execution deadline and a fixed
-0.25-second cleanup grace. Anonymous temporary capture files mean
-descendant-held standard handles cannot block cleanup. The probe retains no
-more than one MiB of combined output. A timeout or output overflow is a breach;
-the probe then stops only the Windows child represented by its owned process
-handle or the POSIX process group that it created for that child.
+0.25-second cleanup grace. The parent drains stdout and stderr through
+operating-system pipes without reader threads or backing files and closes the
+readers as soon as the owned child exits. The storage boundary is one MiB of
+retained captured bytes plus operating-system-bounded pipe buffers. It does not
+bound the total bytes a child may attempt to write; observing one byte beyond
+the retained limit is an output overflow. Descendant-held standard handles
+cannot block cleanup. A timeout or overflow is a breach; the probe then stops
+only the Windows child represented by its owned process handle or the POSIX
+process group that it created for that child.
 
 Native Windows APIs supply trusted directory anchors; inherited PATH and
 mutable SystemRoot, WINDIR, and ProgramFiles inputs are ignored. Reparse points
-and current-token-writable trusted components are rejected. POSIX executable
-and ancestor metadata must show root ownership, no group/other write access,
-and no detectable ACL/current-user write grant. This protects against
-unprivileged project, PATH, and environment shadowing. Privileged
-system-directory mutation, kernel compromise, and replacement by an actor who
-can already modify validated system directories remain outside the boundary.
+and current-token-writable trusted components are rejected. `PSModulePath` is
+set from validated System32 and Program Files module directories and never
+inherited, preventing PowerShell from reconstructing a current-user module
+root. For each requested dangerous right, only `ERROR_ACCESS_DENIED` and
+`ERROR_PRIVILEGE_NOT_HELD` prove that the current token lacks access; sharing
+and transient errors fail closed, as do missing-path and unknown errors. POSIX
+executable and ancestor metadata must show root ownership, no group/other
+write access, and no detectable ACL/current-user write grant. This protects
+against unprivileged project, PATH, environment, and module shadowing.
+Privileged system-directory mutation, kernel compromise, and replacement by an
+actor who can already modify validated system directories remain outside the
+boundary.
 
 The probe does not expose command lines, environment variables, usernames,
 file contents, tokens, or network destinations in process summaries. Reports
