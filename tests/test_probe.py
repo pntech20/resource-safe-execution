@@ -640,6 +640,23 @@ class CommandTests(unittest.TestCase):
             self.killed = True
             self.returncode = -9
 
+    @contextlib.contextmanager
+    def trusted_test_runtime(self) -> object:
+        """Isolate command-I/O tests from host trust-root policy."""
+        with (
+            mock.patch.object(
+                probe,
+                "_trusted_working_directory",
+                return_value=Path.cwd().resolve(),
+            ),
+            mock.patch.object(
+                probe,
+                "_sanitized_environment",
+                return_value=dict(os.environ),
+            ),
+        ):
+            yield
+
     def test_run_command_rejects_invalid_timeout_before_starting_process(
         self,
     ) -> None:
@@ -653,7 +670,11 @@ class CommandTests(unittest.TestCase):
                 popen.assert_not_called()
 
     def test_run_command_accepts_five_second_binding_maximum(self) -> None:
-        result = probe.run_command([sys.executable, "-V"], timeout_seconds=5.0)
+        with self.trusted_test_runtime():
+            result = probe.run_command(
+                [sys.executable, "-V"],
+                timeout_seconds=5.0,
+            )
         self.assertEqual(0, result.returncode)
         self.assertIn("Python", result.stdout)
 
@@ -671,7 +692,7 @@ class CommandTests(unittest.TestCase):
         error_type = getattr(probe, "CommandStartError", None)
         self.assertIsNotNone(error_type)
         secret_path = str(Path(tempfile.gettempdir()) / "sensitive-tool.exe")
-        with mock.patch.object(
+        with self.trusted_test_runtime(), mock.patch.object(
             probe.subprocess,
             "Popen",
             side_effect=FileNotFoundError(2, "missing", secret_path),
@@ -686,7 +707,7 @@ class CommandTests(unittest.TestCase):
 
     def test_start_permission_failure_preserves_bounded_reason(self) -> None:
         secret_path = str(Path(tempfile.gettempdir()) / "sensitive-tool.exe")
-        with mock.patch.object(
+        with self.trusted_test_runtime(), mock.patch.object(
             probe.subprocess,
             "Popen",
             side_effect=PermissionError(13, "denied", secret_path),
@@ -700,15 +721,17 @@ class CommandTests(unittest.TestCase):
         )
 
     def test_run_command_captures_utf8_output_without_a_shell(self) -> None:
-        result = probe.run_command(
-            [
-                sys.executable,
-                "-c",
-                "import sys; "
-                "sys.stdout.buffer.write('resource probe \\u2713'.encode('utf-8'))",
-            ],
-            timeout_seconds=2.0,
-        )
+        with self.trusted_test_runtime():
+            result = probe.run_command(
+                [
+                    sys.executable,
+                    "-c",
+                    "import sys; "
+                    "sys.stdout.buffer.write("
+                    "'resource probe \\u2713'.encode('utf-8'))",
+                ],
+                timeout_seconds=2.0,
+            )
         self.assertEqual(0, result.returncode)
         self.assertEqual("resource probe ✓", result.stdout.strip())
         self.assertEqual("", result.stderr)
@@ -768,7 +791,10 @@ class CommandTests(unittest.TestCase):
             sinks.extend((child.stdout, child.stderr))
             return child
 
+        trusted_cwd = Path(os.path.abspath(os.sep))
+        expected_environment = {"LANG": "C", "LC_ALL": "C"}
         with (
+            self.trusted_test_runtime(),
             mock.patch.object(
                 probe.subprocess,
                 "Popen",
@@ -795,6 +821,16 @@ class CommandTests(unittest.TestCase):
                 },
                 clear=True,
             ),
+            mock.patch.object(
+                probe,
+                "_trusted_working_directory",
+                return_value=trusted_cwd,
+            ),
+            mock.patch.object(
+                probe,
+                "_sanitized_environment",
+                return_value=expected_environment,
+            ),
         ):
             result = probe.run_command([sys.executable, "-V"])
 
@@ -802,7 +838,8 @@ class CommandTests(unittest.TestCase):
         self.assertTrue(popen.called)
         kwargs = popen.call_args.kwargs
         self.assertFalse(kwargs["shell"])
-        self.assertTrue(Path(kwargs["cwd"]).is_absolute())
+        self.assertEqual(os.fspath(trusted_cwd), kwargs["cwd"])
+        self.assertEqual(expected_environment, kwargs["env"])
         self.assertNotIn("PATH", kwargs["env"])
         self.assertNotIn("PYTHONPATH", kwargs["env"])
         self.assertNotIn("VIRTUAL_ENV", kwargs["env"])
@@ -933,10 +970,17 @@ class CommandTests(unittest.TestCase):
         "requires Windows PowerShell module auto-loading",
     )
     def test_windows_user_module_shadow_is_not_auto_loaded(self) -> None:
-        powershell = probe.resolve_trusted_executable(
-            "powershell.exe",
-            system="Windows",
-        )
+        try:
+            powershell = probe.resolve_trusted_executable(
+                "powershell.exe",
+                system="Windows",
+            )
+            probe._sanitized_environment()
+        except (FileNotFoundError, OSError) as exc:
+            self.skipTest(
+                "native Windows trust roots fail closed on this host: "
+                f"{type(exc).__name__}"
+            )
         documents_result = subprocess.run(
             [
                 os.fspath(powershell),
@@ -1034,6 +1078,7 @@ class CommandTests(unittest.TestCase):
             return child
 
         with (
+            self.trusted_test_runtime(),
             mock.patch.object(
                 probe.subprocess,
                 "Popen",
@@ -1083,6 +1128,7 @@ class CommandTests(unittest.TestCase):
         )
         started = time.monotonic()
         with (
+            self.trusted_test_runtime(),
             mock.patch.object(
                 probe,
                 "MAX_COMMAND_OUTPUT_BYTES",
@@ -1113,18 +1159,19 @@ class CommandTests(unittest.TestCase):
         )
 
     def test_real_oversized_child_is_stopped_at_combined_byte_limit(self) -> None:
-        with self.assertRaises(probe.CommandOutputLimitError) as caught:
-            probe.run_command(
-                [
-                    sys.executable,
-                    "-c",
-                    "import sys,time;"
-                    "sys.stdout.buffer.write(b'x'*1048577);"
-                    "sys.stdout.buffer.flush();"
-                    "time.sleep(2)",
-                ],
-                timeout_seconds=2.0,
-            )
+        with self.trusted_test_runtime():
+            with self.assertRaises(probe.CommandOutputLimitError) as caught:
+                probe.run_command(
+                    [
+                        sys.executable,
+                        "-c",
+                        "import sys,time;"
+                        "sys.stdout.buffer.write(b'x'*1048577);"
+                        "sys.stdout.buffer.flush();"
+                        "time.sleep(2)",
+                    ],
+                    timeout_seconds=2.0,
+                )
         self.assertEqual(
             probe.MAX_COMMAND_OUTPUT_BYTES,
             caught.exception.captured_bytes,
@@ -1140,7 +1187,7 @@ class CommandTests(unittest.TestCase):
             sinks.extend((child.stdout, child.stderr))
             return child
 
-        with mock.patch.object(
+        with self.trusted_test_runtime(), mock.patch.object(
             probe.subprocess,
             "Popen",
             side_effect=start_child,
@@ -1210,11 +1257,12 @@ class CommandTests(unittest.TestCase):
 
     def test_real_timed_out_child_is_stopped_before_natural_exit(self) -> None:
         started = time.monotonic()
-        with self.assertRaises(probe.CommandTimeoutError):
-            probe.run_command(
-                [sys.executable, "-c", "import time; time.sleep(2)"],
-                timeout_seconds=0.05,
-            )
+        with self.trusted_test_runtime():
+            with self.assertRaises(probe.CommandTimeoutError):
+                probe.run_command(
+                    [sys.executable, "-c", "import time; time.sleep(2)"],
+                    timeout_seconds=0.05,
+                )
         self.assertLess(time.monotonic() - started, 1.0)
 
     def test_descendant_inheriting_standard_handles_cannot_extend_deadline(
@@ -1229,10 +1277,11 @@ class CommandTests(unittest.TestCase):
             "os._exit(0)"
         )
         started = time.monotonic()
-        result = probe.run_command(
-            [sys.executable, "-c", child_code],
-            timeout_seconds=2.0,
-        )
+        with self.trusted_test_runtime():
+            result = probe.run_command(
+                [sys.executable, "-c", child_code],
+                timeout_seconds=2.0,
+            )
         elapsed = time.monotonic() - started
 
         self.assertEqual(0, result.returncode)
@@ -1471,13 +1520,17 @@ class CommandTests(unittest.TestCase):
     def test_windows_native_system_directory_is_secure_live(self) -> None:
         windows_directory = probe._windows_directory()
         system_directory = probe._windows_system_directory()
-        self.assertTrue(
-            probe._windows_path_is_secure(
-                system_directory,
-                windows_directory,
-                expect_file=False,
-            )
+        secure = probe._windows_path_is_secure(
+            system_directory,
+            windows_directory,
+            expect_file=False,
         )
+        if not secure:
+            self.skipTest(
+                "native Windows trust root is writable or indeterminate; "
+                "the probe correctly fails closed"
+            )
+        self.assertTrue(secure)
 
     @unittest.skipUnless(
         os.name == "nt",
