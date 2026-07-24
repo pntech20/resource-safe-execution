@@ -3,11 +3,11 @@
   "files": [
     {
       "path": "SKILL.md",
-      "sha256": "52d1bf0ba9a1d20dbfe0d25843458f1717650465f7e979856afffcf361a89f51"
+      "sha256": "9961f26fdfa5543b370ad944694805975b8ed49694df88e9271e94f377df54e6"
     },
     {
       "path": "scripts/resource_probe.py",
-      "sha256": "7987ecc4956d431d63353c1d4517c5a8b24594169fd0aaca8dfdafca548928f4"
+      "sha256": "b88603cb066de27a0e4e9e0505439b9bc516127b849351132184cbfbeb33d682"
     },
     {
       "path": "evals/evals.json",
@@ -23,7 +23,7 @@
     },
     {
       "path": "references/windows.md",
-      "sha256": "235670e0f5110293149f4a4dc877e575096bbf72364487fe4699576091292b24"
+      "sha256": "397389f8a06a3d878966508a1948b74f84891df7456edbc8253d562782405489"
     },
     {
       "path": "references/process-lifecycle.md",
