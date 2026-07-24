@@ -25,6 +25,7 @@ SCHEMA_VERSION = "1.0"
 PROBE_VERSION = "0.1.0"
 MIN_SAMPLE_SECONDS = 0.1
 MAX_SAMPLE_SECONDS = 10.0
+MAX_COMMAND_TIMEOUT_SECONDS = 5.0
 SUPPORTED_PLATFORMS = {"Linux", "Darwin", "Windows"}
 
 
@@ -38,13 +39,26 @@ class CommandResult:
 def run_command(
     args: Sequence[str], timeout_seconds: float = 5.0
 ) -> CommandResult:
+    try:
+        validated_timeout = float(timeout_seconds)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("command timeout must be a number") from exc
+    if (
+        not math.isfinite(validated_timeout)
+        or validated_timeout <= 0
+        or validated_timeout > MAX_COMMAND_TIMEOUT_SECONDS
+    ):
+        raise ValueError(
+            f"command timeout must be greater than 0 and at most "
+            f"{MAX_COMMAND_TIMEOUT_SECONDS} seconds"
+        )
     completed = subprocess.run(
         list(args),
         capture_output=True,
         text=True,
         encoding="utf-8",
         errors="replace",
-        timeout=timeout_seconds,
+        timeout=validated_timeout,
         check=False,
         shell=False,
     )

@@ -283,6 +283,34 @@ class SampleValidationTests(unittest.TestCase):
 
 
 class CommandTests(unittest.TestCase):
+    def test_run_command_rejects_invalid_timeout_before_starting_process(
+        self,
+    ) -> None:
+        invalid_timeouts = (0, -1, 5.1, float("nan"), float("inf"), "invalid")
+        for timeout in invalid_timeouts:
+            with self.subTest(timeout=timeout), mock.patch.object(
+                probe.subprocess, "run"
+            ) as subprocess_run:
+                with self.assertRaises(ValueError):
+                    probe.run_command([sys.executable, "-V"], timeout_seconds=timeout)
+                subprocess_run.assert_not_called()
+
+    def test_run_command_accepts_five_second_binding_maximum(self) -> None:
+        completed = subprocess.CompletedProcess(
+            args=[sys.executable, "-V"],
+            returncode=0,
+            stdout="Python",
+            stderr="",
+        )
+        with mock.patch.object(
+            probe.subprocess, "run", return_value=completed
+        ) as subprocess_run:
+            result = probe.run_command(
+                [sys.executable, "-V"], timeout_seconds=5.0
+            )
+        self.assertEqual(0, result.returncode)
+        self.assertEqual(5.0, subprocess_run.call_args.kwargs["timeout"])
+
     def test_run_command_captures_utf8_output_without_a_shell(self) -> None:
         result = probe.run_command(
             [
