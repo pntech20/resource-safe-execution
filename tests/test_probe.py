@@ -11,7 +11,7 @@ import sys
 import tempfile
 import time
 import unittest
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
 from unittest import mock
 
@@ -548,8 +548,9 @@ class PlatformCollectorTests(unittest.TestCase):
             result = probe._collect_gpu("Windows")
         self.assertEqual(2, len(result["devices"]))
         args = command.call_args.args[0]
-        self.assertTrue(Path(args[0]).is_absolute())
-        self.assertEqual("powershell.exe", Path(args[0]).name)
+        windows_executable = PureWindowsPath(os.fspath(args[0]))
+        self.assertTrue(windows_executable.is_absolute())
+        self.assertEqual("powershell.exe", windows_executable.name)
         self.assertIn("Win32_VideoController", args[-1])
 
     def test_windows_processes_use_cim_and_privacy_preserving_parser(self) -> None:
@@ -1257,9 +1258,8 @@ class CommandTests(unittest.TestCase):
                     "powershell.exe",
                     system="Windows",
                 )
-
-        self.assertEqual(trusted, resolved)
-        self.assertNotEqual(shadow / "powershell.exe", resolved)
+                self.assertTrue(trusted.samefile(resolved))
+                self.assertFalse((shadow / "powershell.exe").samefile(resolved))
 
     def test_windows_nvidia_resolution_uses_native_program_files_anchor(
         self,
@@ -1317,9 +1317,8 @@ class CommandTests(unittest.TestCase):
                     "nvidia-smi",
                     system="Windows",
                 )
-
-        self.assertEqual(trusted, resolved)
-        self.assertNotEqual(shadow / "nvidia-smi.exe", resolved)
+                self.assertTrue(trusted.samefile(resolved))
+                self.assertFalse((shadow / "nvidia-smi.exe").samefile(resolved))
 
     @unittest.skipUnless(
         os.name == "nt",
@@ -1506,9 +1505,8 @@ class CommandTests(unittest.TestCase):
                 ),
                 mock.patch.dict(probe.os.environ, {"PATH": str(shadow)}, clear=True),
             ):
-                self.assertEqual(
-                    trusted,
-                    resolver("ps", system="Linux"),
+                self.assertTrue(
+                    trusted.samefile(resolver("ps", system="Linux"))
                 )
                 original_is_symlink = Path.is_symlink
 

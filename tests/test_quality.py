@@ -313,6 +313,10 @@ class RepositoryQualityTests(unittest.TestCase):
         self.assertTrue(workflow_path.is_file(), str(workflow_path))
         workflow = workflow_path.read_text(encoding="utf-8")
         self.assertIn("actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", workflow)
+        checkout_block = workflow.split("- name: Check out repository", 1)[1].split(
+            "- name:", 1
+        )[0]
+        self.assertIn("fetch-depth: 0", checkout_block)
         self.assertIn(
             "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97",
             workflow,
@@ -320,6 +324,17 @@ class RepositoryQualityTests(unittest.TestCase):
         self.assertNotRegex(workflow, r"uses:\s+[^@\s]+@(?![0-9a-f]{40}\b)")
         self.assertIn("python -m compileall skills tests", workflow)
         self.assertIn("python -m unittest discover -s tests -v", workflow)
+        self.assertIn("- name: Smoke-test live JSON probe", workflow)
+        smoke_block = workflow.split("- name: Smoke-test live JSON probe", 1)[
+            1
+        ].split("- name:", 1)[0]
+        self.assertLess(
+            workflow.index("- name: Run tests"),
+            workflow.index("- name: Smoke-test live JSON probe"),
+        )
+        self.assertIn("timeout-minutes: 1", smoke_block)
+        self.assertIn("--format json --sample-seconds 0.1", smoke_block)
+        self.assertIn("json.load(sys.stdin)", smoke_block)
         self.assertIn(
             "python tests/validate_skill.py skills/resource-safe-execution",
             workflow,
