@@ -1,6 +1,6 @@
 # Resource Safe Execution: Design Specification
 
-Status: approved design, awaiting written-spec review
+Status: approved for implementation
 
 Date: 2026-07-24
 
