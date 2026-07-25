@@ -22,7 +22,7 @@ class GrowthSurfaceTests(unittest.TestCase):
         )
         self.assertIn(FAST_INSTALL, first_screen.replace("`\\\n", " "))
         self.assertIn("No telemetry", first_screen)
-        self.assertIn("Watch the 30-second proof", first_screen)
+        self.assertIn("Watch the 38-second proof", first_screen)
 
     def test_readme_discloses_installer_telemetry_boundary(self):
         text = README.read_text(encoding="utf-8")

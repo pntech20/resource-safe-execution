@@ -7,7 +7,10 @@ memory, disk, GPU visibility, and running processes; chooses bounded
 concurrency; verifies acceleration instead of assuming it; and cleans up only
 processes the agent started.
 
-[**Watch the 30-second proof**](assets/launch/resource-safe-execution-demo.gif)
+[![38-second recorded evaluation playback showing bounded execution and
+ownership-safe cleanup](assets/launch/resource-safe-execution-demo.gif)](assets/launch/resource-safe-execution-demo.gif)
+
+[**Watch the 38-second proof**](assets/launch/resource-safe-execution-demo.gif)
 · [Read the safety model](#safety-guarantees)
 · [See compatibility evidence](docs/compatibility.md)
 
