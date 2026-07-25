@@ -1,5 +1,7 @@
 # Resource Safe Execution
 
+[![skills.sh installs](https://skills.sh/b/pntech20/resource-safe-execution)](https://skills.sh/pntech20/resource-safe-execution/resource-safe-execution)
+
 ## Let your AI agent run heavy jobs—without freezing your workstation.
 
 Resource Safe Execution is a cross-platform Agent Skill that inspects CPU,
@@ -182,6 +184,8 @@ documentation-only project releases.
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md) before proposing a change. Report
 vulnerabilities privately according to [SECURITY.md](SECURITY.md).
+
+[Support](SUPPORT.md) · [Privacy](PRIVACY.md) · [Terms](TERMS.md)
 
 ## License
 

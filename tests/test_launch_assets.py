@@ -216,6 +216,15 @@ class LaunchAssetTests(unittest.TestCase):
         self.assertIn("Flair: `Resource`", copy)
         self.assertIn("Flair: `Showcase`", copy)
         self.assertIn("Status: **DO NOT POST**", copy)
+        show_hn = copy.split("## Show HN", 1)[1].split("## Reddit", 1)[0]
+        self.assertIn("HUMAN REWRITE REQUIRED", show_hn)
+        self.assertIn("https://news.ycombinator.com/showhn.html", show_hn)
+        self.assertIn(
+            "https://news.ycombinator.com/newsguidelines.html",
+            show_hn,
+        )
+        self.assertIn("no ready-to-paste body", show_hn)
+        self.assertNotIn("```text", show_hn)
         claudeai = copy.split("### r/ClaudeAI", 1)[1].split(
             "### r/ClaudeCode",
             1,

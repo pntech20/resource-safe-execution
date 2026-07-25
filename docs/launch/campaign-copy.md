@@ -49,21 +49,19 @@ https://github.com/pntech20/resource-safe-execution
 
 ## Show HN
 
-Title: `Show HN: Resource Safe Execution – keep heavy local agent jobs within headroom`
+Status: **HUMAN REWRITE REQUIRED — DO NOT POST THIS DRAFT**
 
-Maker comment:
+Rules:
 
-```text
-I built Resource Safe Execution after my own workstation became unusable while agents, emulators, and browser workers competed for resources.
+- https://news.ycombinator.com/showhn.html
+- https://news.ycombinator.com/newsguidelines.html
 
-The skill guides an agent through inspecting current resources, deriving a conservative concurrency bound, verifying GPU use instead of assuming it, and cleaning up only the process tree it started. It is MIT-licensed, has 140+ tests, and includes a recorded evaluation playback plus three evidence-linked case studies.
-
-The skill runtime sends no telemetry and makes no network calls. Installation uses the third-party skills CLI, which records anonymous, opt-out install telemetry:
-
-npx --yes skills@1.5.20 add pntech20/resource-safe-execution --skill resource-safe-execution --copy
-
-Project: https://github.com/pntech20/resource-safe-execution
-```
+Hacker News currently says not to post generated or AI-edited text. A human
+account holder must write the title and maker comment independently, using the
+verified facts above only as research. The final submission must explain the
+personal motivation and technical design, link to the runnable repository, and
+avoid vote or comment solicitation. The maker should remain available for
+4–6 hours. This section intentionally contains no ready-to-paste body.
 
 ## Reddit
 
