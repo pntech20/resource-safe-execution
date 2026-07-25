@@ -1,0 +1,37 @@
+{
+  "name": "resource-safe-execution",
+  "version": "0.2.0",
+  "description": "Safely plan and run resource-intensive agent workloads.",
+  "author": {
+    "name": "pntech20",
+    "url": "https://github.com/pntech20"
+  },
+  "homepage": "https://github.com/pntech20/resource-safe-execution",
+  "repository": "https://github.com/pntech20/resource-safe-execution",
+  "license": "MIT",
+  "keywords": [
+    "agent-skills",
+    "resource-management",
+    "process-safety"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Resource Safe Execution",
+    "shortDescription": "Run heavy agent work without freezing your machine.",
+    "longDescription": "Plan and run CPU-, memory-, disk-, GPU-, browser-, emulator-, and process-intensive work with bounded concurrency and ownership-safe cleanup.",
+    "developerName": "pntech20",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Interactive"
+    ],
+    "websiteURL": "https://github.com/pntech20/resource-safe-execution",
+    "privacyPolicyURL": "https://github.com/pntech20/resource-safe-execution/blob/main/PRIVACY.md",
+    "termsOfServiceURL": "https://github.com/pntech20/resource-safe-execution/blob/main/TERMS.md",
+    "defaultPrompt": [
+      "Inspect this machine and choose a safe profile before running my workload.",
+      "Plan bounded concurrency for this build and browser workload.",
+      "Track and clean up only the process tree you launch."
+    ],
+    "brandColor": "#14B8A6"
+  }
+}

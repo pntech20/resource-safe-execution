@@ -44,3 +44,41 @@ class GrowthSurfaceTests(unittest.TestCase):
         )
         self.assertIn("skill-manifest.json", text)
         self.assertIn("SHA256SUMS", text)
+
+    def test_openai_plugin_points_to_canonical_skills(self):
+        path = ROOT / ".codex-plugin" / "plugin.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(data["name"], "resource-safe-execution")
+        self.assertEqual(data["version"], "0.2.0")
+        self.assertEqual(data["skills"], "./skills/")
+        self.assertTrue((ROOT / data["skills"]).resolve().is_dir())
+        self.assertEqual(data["author"]["name"], "pntech20")
+        interface = data["interface"]
+        self.assertEqual(interface["displayName"], "Resource Safe Execution")
+        self.assertEqual(interface["developerName"], "pntech20")
+        self.assertEqual(len(interface["defaultPrompt"]), 3)
+        self.assertTrue(interface["websiteURL"].startswith("https://"))
+        self.assertTrue(interface["privacyPolicyURL"].startswith("https://"))
+        self.assertTrue(interface["termsOfServiceURL"].startswith("https://"))
+
+    def test_claude_plugin_metadata_is_complete(self):
+        path = ROOT / ".claude-plugin" / "plugin.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(data["name"], "resource-safe-execution")
+        self.assertEqual(data["version"], "0.2.0")
+        self.assertEqual(data["license"], "MIT")
+        self.assertEqual(
+            data["repository"],
+            "https://github.com/pntech20/resource-safe-execution",
+        )
+
+    def test_claude_marketplace_uses_repository_root_plugin(self):
+        path = ROOT / ".claude-plugin" / "marketplace.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(data["name"], "pntech20-agent-skills")
+        self.assertEqual(data["owner"]["name"], "pntech20")
+        self.assertEqual(len(data["plugins"]), 1)
+        plugin = data["plugins"][0]
+        self.assertEqual(plugin["name"], "resource-safe-execution")
+        self.assertEqual(plugin["source"], "./")
+        self.assertEqual(plugin["version"], "0.2.0")

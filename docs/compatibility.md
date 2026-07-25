@@ -24,6 +24,25 @@ They also parse the two-field frontmatter and require each direct local link to
 resolve inside every copied skill directory. They do not launch any proprietary
 client, so this repository currently has no actual client runtime validation.
 
+## Plugin package validation as of 2026-07-25
+
+The OpenAI/Codex wrapper at `.codex-plugin/plugin.json` passed the installed
+plugin ingestion validator:
+
+```powershell
+python C:\Users\Admin\.codex\skills\.system\plugin-creator\scripts\validate_plugin.py .
+```
+
+Result: `Plugin validation passed` for this repository root. This proves the
+local manifest and canonical skill folder satisfy that validator; it is not
+OpenAI directory approval or proprietary-client runtime evidence.
+
+The Claude CLI is not installed on this host: `Get-Command claude
+-ErrorAction SilentlyContinue` returned no command. Therefore
+`claude plugin validate .` was not run. Repository tests parse the Claude
+plugin and marketplace JSON and verify their canonical source relationship,
+but that local contract is not official Claude validation or runtime evidence.
+
 ## Platform and release evidence
 
 | Platform | Physical host evidence | Fixture evidence | Hosted CI evidence |

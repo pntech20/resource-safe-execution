@@ -1,0 +1,11 @@
+{
+  "name": "resource-safe-execution",
+  "description": "Bounds concurrency, verifies GPU use, and cleans up only owned processes.",
+  "version": "0.2.0",
+  "author": {
+    "name": "pntech20"
+  },
+  "repository": "https://github.com/pntech20/resource-safe-execution",
+  "homepage": "https://github.com/pntech20/resource-safe-execution",
+  "license": "MIT"
+}
