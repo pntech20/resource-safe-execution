@@ -173,6 +173,77 @@ class LaunchAssetTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, joined)
 
+    def test_campaign_copy_contract(self):
+        campaign_copy = ROOT / "docs" / "launch" / "campaign-copy.md"
+        self.assertTrue(campaign_copy.is_file())
+
+        copy = campaign_copy.read_text(encoding="utf-8")
+        maker_disclosure = (
+            "I built Resource Safe Execution after my own workstation became "
+            "unusable while agents, emulators, and browser workers competed "
+            "for resources."
+        )
+        self.assertIn(maker_disclosure, copy)
+        self.assertIn(CANONICAL_INSTALL, copy)
+        self.assertIn("140+ tests", copy)
+        self.assertIn("skill runtime sends no telemetry", copy)
+        self.assertIn("anonymous, opt-out install telemetry", copy)
+        self.assertIn("manual account-holder posting", copy)
+        self.assertIn("Rules checked: 2026-07-25", copy)
+
+        for heading in (
+            "## X",
+            "## LinkedIn",
+            "## Show HN",
+            "### r/ClaudeAI",
+            "### r/ClaudeCode",
+            "### r/codex",
+            "### r/opensource",
+            "## Publish-day checklist",
+        ):
+            self.assertEqual(copy.count(heading), 1)
+
+        rule_urls = (
+            "https://www.reddit.com/r/ClaudeAI/about/rules.json",
+            "https://www.reddit.com/r/ClaudeCode/about/rules.json",
+            "https://www.reddit.com/r/codex/about/rules.json",
+            "https://www.reddit.com/r/opensource/about/rules.json",
+        )
+        for rule_url in rule_urls:
+            self.assertIn(rule_url, copy)
+
+        self.assertIn("Flair: `Claude Code`", copy)
+        self.assertIn("Flair: `Resource`", copy)
+        self.assertIn("Flair: `Showcase`", copy)
+        self.assertIn("Status: **DO NOT POST**", copy)
+        claudeai = copy.split("### r/ClaudeAI", 1)[1].split(
+            "### r/ClaudeCode",
+            1,
+        )[0]
+        self.assertIn("Status: **DO NOT POST**", claudeai)
+        self.assertRegex(claudeai, r"Do not invent\s+Claude involvement")
+        self.assertNotIn("```text", claudeai)
+        opensource = copy.split("### r/opensource", 1)[1].split(
+            "## Publish-day checklist",
+            1,
+        )[0]
+        self.assertNotIn("```text", opensource)
+
+        x_match = re.search(r"## X\s+```text\s+(.*?)\s+```", copy, re.DOTALL)
+        self.assertIsNotNone(x_match)
+        self.assertLessEqual(len(x_match.group(1)), 280)
+
+        for forbidden in (
+            "127 tests",
+            "Local, no telemetry",
+            "please star",
+            "upvote this",
+            "please repost",
+            "vote for this",
+            "I built this with Claude",
+        ):
+            self.assertNotIn(forbidden.lower(), copy.lower())
+
 
 if __name__ == "__main__":
     unittest.main()
