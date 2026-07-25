@@ -1,8 +1,8 @@
 # Resource Safe Execution: 1,000-Install Growth Design
 
-**Date:** 2026-07-25  
-**Status:** Approved through the user's automatic-selection instruction  
-**Campaign window:** 30 days  
+**Date:** 2026-07-25
+**Status:** Approved through the user's automatic-selection instruction
+**Campaign window:** 30 days
 **Primary goal:** 1,000 installs recorded for `pntech20/resource-safe-execution` by the `skills` CLI
 
 ## 1. Objective and audience
@@ -57,14 +57,14 @@ Lead every asset with one canonical `npx skills add` command, make the repositor
 convert visitors into installs, seed genuine beta installs, and use the
 skills.sh leaderboard as the compounding discovery surface.
 
-**Strength:** Directly optimizes the selected metric.  
+**Strength:** Directly optimizes the selected metric.
 **Trade-off:** Requires excellent onboarding and a real visual demonstration.
 
 ### B. Credibility-first technical launch
 
 Lead with evaluations, security properties, and a long technical article.
 
-**Strength:** Strong trust and durable search value.  
+**Strength:** Strong trust and durable search value.
 **Trade-off:** The current repository already has substantial proof; more proof
 without a shorter install funnel is unlikely to produce 1,000 installs quickly.
 
@@ -72,7 +72,7 @@ without a shorter install funnel is unlikely to produce 1,000 installs quickly.
 
 Wait for OpenAI and Claude directory acceptance before broader promotion.
 
-**Strength:** High-trust distribution if accepted.  
+**Strength:** High-trust distribution if accepted.
 **Trade-off:** Review timelines are undocumented and outside the maintainer's
 control, so this cannot be the critical path for a 30-day target.
 
