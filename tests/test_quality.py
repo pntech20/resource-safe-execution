@@ -9,6 +9,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SKILL_DIR = REPO_ROOT / "skills" / "resource-safe-execution"
+BINARY_SUFFIXES = {".gif", ".png"}
 EXPECTED_README_HEADINGS = [
     "# Resource Safe Execution",
     "## Let your AI agent run heavy jobs—without freezing your workstation.",
@@ -60,6 +61,8 @@ class RepositoryQualityTests(unittest.TestCase):
 
     def test_all_tracked_files_are_utf8_without_whitespace_defects(self) -> None:
         for path in tracked_files():
+            if path.suffix.lower() in BINARY_SUFFIXES:
+                continue
             with self.subTest(path=path.relative_to(REPO_ROOT)):
                 text = path.read_bytes().decode("utf-8")
                 for line_number, line in enumerate(text.splitlines(), start=1):
