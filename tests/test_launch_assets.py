@@ -10,6 +10,23 @@ PREVIEW = ASSET_DIR / "resource-safe-execution-social-preview.png"
 PREVIEW_SOURCE = ASSET_DIR / "social-preview-source.svg"
 DEMO = ASSET_DIR / "resource-safe-execution-demo.gif"
 STORYBOARD = ROOT / "docs" / "launch" / "demo-storyboard.md"
+CASE_STUDIES = {
+    "concurrency.md": (
+        "Bound parallelism from current headroom—not a guessed worker count",
+        "../evaluations/raw/concurrency-pressure.md",
+        "../evaluations/raw/skill-enabled/concurrency-pressure.md",
+    ),
+    "gpu-verification.md": (
+        "A visible GPU is not proof that the workload uses it",
+        "../evaluations/raw/gpu-assumption.md",
+        "../evaluations/raw/skill-enabled/gpu-assumption.md",
+    ),
+    "process-cleanup.md": (
+        "Stop the process tree you own—not every process with the same name",
+        "../evaluations/raw/cleanup-pressure.md",
+        "../evaluations/raw/skill-enabled/cleanup-pressure.md",
+    ),
+}
 CANONICAL_INSTALL = (
     "npx --yes skills@1.5.20 add pntech20/resource-safe-execution "
     "--skill resource-safe-execution --copy"
@@ -93,6 +110,48 @@ class LaunchAssetTests(unittest.TestCase):
         )
         self.assertNotIn("selects three", text.lower())
         self.assertNotIn("no telemetry. no network.", text.lower())
+
+    def test_case_studies_have_shared_structure_and_evidence(self):
+        section_names = (
+            "## The risky request",
+            "## What an unbounded agent may assume",
+            "## What the skill changes",
+            "## What it does not prove",
+            "## Try it",
+        )
+        for filename, (title, baseline_link, skill_link) in CASE_STUDIES.items():
+            with self.subTest(filename=filename):
+                text = (
+                    ROOT / "docs" / "case-studies" / filename
+                ).read_text(encoding="utf-8")
+                self.assertEqual(text.splitlines()[0], f"# {title}")
+                for section_name in section_names:
+                    self.assertEqual(text.count(section_name), 1)
+                self.assertIn(CANONICAL_INSTALL, text)
+                self.assertIn(f"]({baseline_link})", text)
+                self.assertIn(f"]({skill_link})", text)
+                self.assertIn(
+                    "](../evaluations/2026-07-24-skill-enabled.md",
+                    text,
+                )
+                self.assertIn(
+                    "not an evaluation of the current `SKILL.md`",
+                    text,
+                )
+                self.assertNotRegex(text, r"\b\d+(?:\.\d+)?%")
+                self.assertNotRegex(
+                    text.lower(),
+                    r"\b(?:\d+|one|two|three|four|five|six|seven|eight)"
+                    r"[ -]+(?:playwright[ -]+)?workers?\b",
+                )
+                for unsupported in (
+                    "physically tested",
+                    "performance improvement",
+                    "runtime improvement",
+                    "speedup",
+                    "validated in current clients",
+                ):
+                    self.assertNotIn(unsupported, text.lower())
 
     def test_campaign_assets_avoid_unproven_claims(self):
         paths = [
