@@ -29,7 +29,7 @@ class GrowthSurfaceTests(unittest.TestCase):
         self.assertRegex(
             text,
             re.compile(
-                r"skills CLI.*anonymous.*install telemetry.*"
+                r"`skills` CLI.*anonymous.*install telemetry.*"
                 r"Resource Safe Execution.*no telemetry",
                 re.IGNORECASE | re.DOTALL,
             ),
