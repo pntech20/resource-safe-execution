@@ -42,7 +42,7 @@ After installation, try:
 For a reviewed, release-pinned copy:
 
 ```powershell
-npx --yes skills@1.5.20 add https://github.com/pntech20/resource-safe-execution/tree/v0.1.0/skills/resource-safe-execution --skill resource-safe-execution --copy
+npx --yes skills@1.5.20 add https://github.com/pntech20/resource-safe-execution/tree/v0.2.0/skills/resource-safe-execution --skill resource-safe-execution --copy
 ```
 
 Before use, verify the nine copied paths against
@@ -61,10 +61,11 @@ monitoring work, and cleaning up only processes it started.
 The canonical [Agent Skill](skills/resource-safe-execution) combines portable
 policy with a Python 3.10+ probe for read-only host inspection of CPU, memory,
 disk, GPU visibility, and privacy-preserving process summaries. On POSIX, its
-only optional write is an explicitly requested output file. Windows v0.1
-requires stdout because the standard library cannot create a file relative to
-a held directory handle without an ancestor path race. Platform-specific
-guidance is loaded from direct local links in the skill folder.
+only optional write is an explicitly requested output file. The current
+Windows probe requires stdout because the standard library cannot create a
+file relative to a held directory handle without an ancestor path race.
+Platform-specific guidance is loaded from direct local links in the skill
+folder.
 
 ## Safety guarantees
 
@@ -141,14 +142,16 @@ client-specific claim.
 
 ### Release status
 
-The release is `v0.1.0`. All 17 required skill-enabled behavior
-signals are present in the [auditable evaluation](docs/evaluations/2026-07-24-skill-enabled.md),
-and final-review provenance is hash-checked by the repository suite. The
-local Codex installation contains the exact nine manifest-listed files.
+The current release is `v0.2.0`. Its [release notes](docs/releases/v0.2.0.md)
+describe the packaging and distribution changes. All 17 required
+skill-enabled behavior signals are present in the
+[auditable evaluation](docs/evaluations/2026-07-24-skill-enabled.md), and
+final-review provenance is hash-checked by the repository suite. The local
+Codex installation contains the exact nine manifest-listed files.
 
 Windows was physically exercised on this host with the live probe, both
 validators, and the repository suite. The
-[hosted CI run](https://github.com/pntech20/resource-safe-execution/actions/runs/30098155287)
+[hosted CI run](https://github.com/pntech20/resource-safe-execution/actions/runs/30152264016)
 passed all six Windows, macOS, and Ubuntu jobs on Python 3.10 and 3.13,
 including a live JSON smoke probe. Physical macOS, physical Linux, Claude
 Code, Antigravity, and other proprietary client runtime checks remain
@@ -164,9 +167,9 @@ The probe prints one JSON document. On macOS and Linux,
 `--output NEW_FILE` performs an optional output-file write using POSIX
 directory-handle-relative, no-follow traversal and exclusive creation. It
 refuses existing files, symlinks, and invalid parent paths even if an ancestor
-is swapped concurrently. Windows v0.1 requires stdout and rejects `--output`
-with exit code `1`. Missing host metrics degrade individually with a
-machine-readable reason.
+is swapped concurrently. The current Windows probe requires stdout and rejects
+`--output` with exit code `1`. Missing host metrics degrade individually with
+a machine-readable reason.
 
 ## Validate
 
