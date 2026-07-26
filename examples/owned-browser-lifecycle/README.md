@@ -39,6 +39,11 @@ Persist the `onOwnership` record beside task logs before doing browser work.
 Before any fallback termination, re-read the root and match both PID and
 `startIdentity`. A failed match is not owned.
 
+The launch adapter owns partial-launch failure: if it starts a process but
+cannot return a complete ownership record, it must close that process before
+rejecting. Return the complete record immediately after spawn; the harness
+deadline then covers ownership reporting and browser work.
+
 ## Deadline ordering
 
 Make the harness deadline shorter than an external supervisor:
@@ -71,5 +76,5 @@ browser or use the network:
 node --test examples/owned-browser-lifecycle/with-owned-browser.test.cjs
 ```
 
-They cover success, task failure, internal timeout, unverifiable cleanup, and
-ownership reporting.
+They cover success, task failure, internal timeout, unverifiable cleanup,
+ownership reporting, and a stalled ownership callback.

@@ -129,13 +129,16 @@ async function withOwnedBrowser({
 
   try {
     record = validateRecord(await launch(controller.signal));
-    await onOwnership(publicOwnership(record));
     const timeout = new Promise((resolve, reject) => {
       deadline = setTimeout(() => {
         controller.abort();
         reject(new BrowserTimeoutError(timeoutMs));
       }, timeoutMs);
     });
+    await Promise.race([
+      Promise.resolve().then(() => onOwnership(publicOwnership(record))),
+      timeout,
+    ]);
     return await Promise.race([
       Promise.resolve().then(() => run(record.browser, controller.signal)),
       timeout,

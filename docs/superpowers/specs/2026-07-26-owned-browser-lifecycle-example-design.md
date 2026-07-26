@@ -81,6 +81,7 @@ harmless child process:
 3. an internal deadline closes its child and returns the timeout error;
 4. a cleanup that cannot verify exit returns a cleanup error;
 5. the ownership callback receives the required identity fields.
+6. a stalled ownership callback reaches the same deadline and closes its child.
 
 The tests will not launch a browser, use the network, install packages, or
 terminate processes by executable name. CI will run the Node tests on the

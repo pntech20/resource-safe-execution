@@ -153,3 +153,22 @@ test('reports the complete ownership record immediately after launch', async (t)
   assert.equal(ownership.expectedLifetime, 'task');
   assert.equal(ownership.cleanupMethod, 'adapter close() then waitForExit()');
 });
+
+test('closes the owned child when ownership reporting exceeds the deadline', async (t) => {
+  let rootPid;
+  await assert.rejects(
+    withOwnedBrowser({
+      launch: async () => {
+        const record = launchChild(t);
+        rootPid = record.rootPid;
+        return record;
+      },
+      run: async () => 'complete',
+      timeoutMs: 50,
+      onOwnership: async () => delay(100),
+    }),
+    BrowserTimeoutError,
+  );
+
+  assert.equal(processExists(rootPid), false);
+});

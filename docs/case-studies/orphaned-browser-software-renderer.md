@@ -62,6 +62,7 @@ its child alive. After the fix, it should prove:
 - success closes the owned child;
 - task failure closes the owned child without hiding the task error;
 - the internal deadline closes the owned child;
+- stalled ownership reporting reaches the deadline and closes the owned child;
 - unverifiable exit is reported instead of assumed.
 
 After the incident-specific browser was closed, the matching process count

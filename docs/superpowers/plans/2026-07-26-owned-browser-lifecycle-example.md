@@ -25,7 +25,7 @@
 
 **Interfaces:**
 - Consumes: `withOwnedBrowser`, `BrowserTimeoutError`, and `BrowserCleanupError` from `./with-owned-browser.cjs`.
-- Produces: executable behavioral coverage for success, task failure, timeout, cleanup verification, and ownership reporting.
+- Produces: executable behavioral coverage for success, task failure, timeout, cleanup verification, ownership reporting, and stalled reporting.
 
 - [ ] **Step 1: Write the real-process test helper**
 
@@ -52,7 +52,7 @@ function launchChild(overrides = {}) {
 }
 ```
 
-- [ ] **Step 2: Add five behavior tests**
+- [ ] **Step 2: Add six behavior tests**
 
 Implement tests with these literal expectations:
 
@@ -107,8 +107,9 @@ test('closes the owned child at the internal deadline', async () => {
 });
 ```
 
-Add one cleanup-failure test expecting `BrowserCleanupError` and one ownership
-callback test expecting the exact required field names.
+Add one cleanup-failure test expecting `BrowserCleanupError`, one ownership
+callback test expecting the exact required field names, and one stalled
+ownership callback test expecting `BrowserTimeoutError`.
 
 - [ ] **Step 3: Run the test and verify RED**
 
@@ -210,7 +211,7 @@ Run:
 node --test examples/owned-browser-lifecycle/with-owned-browser.test.cjs
 ```
 
-Expected: 5 tests pass, 0 fail, and no child process remains.
+Expected: 6 tests pass, 0 fail, and no child process remains.
 
 - [ ] **Step 4: Commit the implementation**
 
