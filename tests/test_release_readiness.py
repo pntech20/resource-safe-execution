@@ -36,6 +36,21 @@ class ReleaseReadinessTests(unittest.TestCase):
         self.assertIn(f"The current release is `{TAG}`.", readme)
         self.assertNotIn("The release is `v0.1.0`.", readme)
 
+    def test_compatibility_separates_package_and_payload_versions(self):
+        compatibility = (ROOT / "docs" / "compatibility.md").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn(
+            "The current package release is `v0.2.0`.",
+            compatibility,
+        )
+        self.assertIn(
+            "canonical skill payload remains the checksum-audited "
+            "`v0.1.0` payload",
+            compatibility,
+        )
+
     def test_release_notes_define_scope_and_install(self):
         notes = (ROOT / "docs" / "releases" / f"{TAG}.md").read_text(
             encoding="utf-8"

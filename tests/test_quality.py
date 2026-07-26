@@ -275,7 +275,7 @@ class RepositoryQualityTests(unittest.TestCase):
         self.assertIn("third-party `skills` cli", readme.lower())
         self.assertIn(
             "npx --yes skills@1.5.20 add "
-            "https://github.com/pntech20/resource-safe-execution/tree/v0.1.0/"
+            "https://github.com/pntech20/resource-safe-execution/tree/v0.2.0/"
             "skills/resource-safe-execution --skill resource-safe-execution --copy",
             readme,
         )
