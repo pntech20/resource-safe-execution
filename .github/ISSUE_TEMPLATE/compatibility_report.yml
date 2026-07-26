@@ -1,0 +1,84 @@
+name: Compatibility report
+description: Share evidence from using Resource Safe Execution with a real workflow.
+title: "[Compatibility]: "
+labels:
+  - compatibility
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Compatibility reports help us understand what worked in a real environment. A report is evidence, not automatic support, endorsement, or a commitment to support every client, platform, or installation method.
+
+        Do not include secrets, private task content, personal data, or security vulnerabilities. Report vulnerabilities privately through the security advisory link instead.
+  - type: input
+    id: release_commit
+    attributes:
+      label: Release or commit
+      description: Provide the release tag, package version, or commit SHA you tested.
+      placeholder: vX.Y.Z or abc1234
+    validations:
+      required: true
+  - type: input
+    id: agent_client_version
+    attributes:
+      label: Agent client and version
+      description: Name the agent client and exact version used for the test.
+      placeholder: Codex 1.2.3
+    validations:
+      required: true
+  - type: input
+    id: operating_system_version
+    attributes:
+      label: Operating system and version
+      description: Identify the operating system and version.
+      placeholder: Windows 11 24H2
+    validations:
+      required: true
+  - type: input
+    id: installation_method
+    attributes:
+      label: Installation method
+      description: State how Resource Safe Execution was installed or made available.
+      placeholder: Plugin installation, local checkout, or package manager command
+    validations:
+      required: true
+  - type: textarea
+    id: real_task
+    attributes:
+      label: Real task
+      description: Describe the real task you performed, redacting any sensitive details.
+      placeholder: What were you trying to accomplish, and what resources or processes were involved?
+    validations:
+      required: true
+  - type: textarea
+    id: observed_activation
+    attributes:
+      label: Observed activation
+      description: Explain how and when the guidance or safeguards activated during the task.
+      placeholder: Include the observed trigger and response.
+    validations:
+      required: true
+  - type: textarea
+    id: probe_result
+    attributes:
+      label: Probe result
+      description: Record the outcome of the relevant safety or environment probe.
+      placeholder: State what was checked and the result.
+    validations:
+      required: true
+  - type: textarea
+    id: cleanup_result
+    attributes:
+      label: Cleanup result
+      description: Record what cleanup ran and its outcome, including any leftovers.
+      placeholder: State what was cleaned up and whether anything remained.
+    validations:
+      required: true
+  - type: checkboxes
+    id: privacy_confirmation
+    attributes:
+      label: Privacy confirmation
+      description: Confirm that the report is safe to publish publicly.
+      options:
+        - label: I have removed secrets, personal data, private task content, and vulnerability details from this report.
+          required: true

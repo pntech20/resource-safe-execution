@@ -9,12 +9,14 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SKILL_DIR = REPO_ROOT / "skills" / "resource-safe-execution"
+BINARY_SUFFIXES = {".gif", ".png"}
 EXPECTED_README_HEADINGS = [
     "# Resource Safe Execution",
+    "## Let your AI agent run heavy jobs—without freezing your workstation.",
     "## Why",
     "## What it does",
     "## Safety guarantees",
-    "## Install",
+    "## Detailed manual installation",
     "## Agent compatibility",
     "## Run the probe directly",
     "## Validate",
@@ -59,6 +61,8 @@ class RepositoryQualityTests(unittest.TestCase):
 
     def test_all_tracked_files_are_utf8_without_whitespace_defects(self) -> None:
         for path in tracked_files():
+            if path.suffix.lower() in BINARY_SUFFIXES:
+                continue
             with self.subTest(path=path.relative_to(REPO_ROOT)):
                 text = path.read_bytes().decode("utf-8")
                 for line_number, line in enumerate(text.splitlines(), start=1):
@@ -268,7 +272,7 @@ class RepositoryQualityTests(unittest.TestCase):
         self.assertIn("skill-manifest.json", readme)
         self.assertIn("SHA256SUMS", readme)
         self.assertIn("safe default", readme.lower())
-        self.assertIn("convenience-only", readme.lower())
+        self.assertIn("third-party `skills` cli", readme.lower())
         self.assertIn(
             "npx --yes skills@1.5.20 add "
             "https://github.com/pntech20/resource-safe-execution/tree/v0.1.0/"

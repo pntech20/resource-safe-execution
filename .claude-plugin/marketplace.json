@@ -1,0 +1,26 @@
+{
+  "name": "pntech20-agent-skills",
+  "owner": {
+    "name": "pntech20"
+  },
+  "plugins": [
+    {
+      "name": "resource-safe-execution",
+      "source": "./",
+      "description": "Bounds concurrency, verifies GPU use, and cleans up only owned processes.",
+      "version": "0.2.0",
+      "author": {
+        "name": "pntech20"
+      },
+      "homepage": "https://github.com/pntech20/resource-safe-execution",
+      "repository": "https://github.com/pntech20/resource-safe-execution",
+      "license": "MIT",
+      "category": "development",
+      "tags": [
+        "agent-skills",
+        "resource-management",
+        "process-safety"
+      ]
+    }
+  ]
+}

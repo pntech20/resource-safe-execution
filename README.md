@@ -1,5 +1,54 @@
 # Resource Safe Execution
 
+[![skills.sh installs](https://skills.sh/b/pntech20/resource-safe-execution)](https://skills.sh/pntech20/resource-safe-execution/resource-safe-execution)
+
+## Let your AI agent run heavy jobs—without freezing your workstation.
+
+Resource Safe Execution is a cross-platform Agent Skill that inspects CPU,
+memory, disk, GPU visibility, and running processes; chooses bounded
+concurrency; verifies acceleration instead of assuming it; and cleans up only
+processes the agent started.
+
+[![38-second recorded evaluation playback showing bounded execution and
+ownership-safe cleanup](assets/launch/resource-safe-execution-demo.gif)](assets/launch/resource-safe-execution-demo.gif)
+
+[**Watch the 38-second proof**](assets/launch/resource-safe-execution-demo.gif)
+· [Read the safety model](#safety-guarantees)
+· [See compatibility evidence](docs/compatibility.md)
+
+> **No telemetry · No network access · Python standard library only ·
+> SHA-256 release manifest · Windows/macOS/Linux CI**
+
+### Fast install
+
+The open `skills` CLI can install the canonical folder:
+
+```powershell
+npx --yes skills@1.5.20 add pntech20/resource-safe-execution --skill resource-safe-execution --copy
+```
+
+The third-party `skills` CLI records anonymous, opt-out install telemetry used
+by skills.sh. Resource Safe Execution itself sends no telemetry and performs no
+network access.
+
+After installation, try:
+
+> Before running this build and eight browser workers, inspect my machine,
+> choose a safe profile, track every process you launch, and clean up only your
+> owned tree.
+
+### Audited install
+
+For a reviewed, release-pinned copy:
+
+```powershell
+npx --yes skills@1.5.20 add https://github.com/pntech20/resource-safe-execution/tree/v0.1.0/skills/resource-safe-execution --skill resource-safe-execution --copy
+```
+
+Before use, verify the nine copied paths against
+[`skill-manifest.json`](skill-manifest.json) and [`SHA256SUMS`](SHA256SUMS).
+The detailed manual-copy procedure and client destinations appear below.
+
 ## Why
 
 Resource-heavy coding tasks can make a workstation unresponsive, exhaust disk
@@ -51,7 +100,7 @@ file contents, tokens, and network destinations. Detection of GPU hardware is
 not presented as proof that an application uses a particular acceleration
 backend.
 
-## Install
+## Detailed manual installation
 
 Review all executable skill contents, especially
 `scripts/resource_probe.py`, before installation.
@@ -75,15 +124,6 @@ Use the appropriate destination root:
 | Claude personal | `~/.claude/skills/resource-safe-execution` |
 | Antigravity workspace | `.agents/skills/resource-safe-execution` |
 | Antigravity global | `~/.gemini/config/skills/resource-safe-execution` |
-
-The open [`skills`](https://github.com/vercel-labs/skills) installer is a
-convenience-only remote route. Copy-layout tests do not exercise it:
-
-```powershell
-npx --yes skills@1.5.20 add https://github.com/pntech20/resource-safe-execution/tree/v0.1.0/skills/resource-safe-execution --skill resource-safe-execution --copy
-```
-
-Review the installed files again before allowing an agent to execute them.
 
 ## Agent compatibility
 
@@ -144,6 +184,8 @@ documentation-only project releases.
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md) before proposing a change. Report
 vulnerabilities privately according to [SECURITY.md](SECURITY.md).
+
+[Support](SUPPORT.md) · [Privacy](PRIVACY.md) · [Terms](TERMS.md)
 
 ## License
 
