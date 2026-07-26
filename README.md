@@ -67,6 +67,16 @@ file relative to a held directory handle without an ancestor path race.
 Platform-specific guidance is loaded from direct local links in the skill
 folder.
 
+### Incident-derived browser example
+
+A real orphaned headless-browser incident combined forced CPU software
+rendering with detached execution and missing cleanup. The anonymized
+[case study](docs/case-studies/orphaned-browser-software-renderer.md) traces
+the evidence and root cause. The dependency-free
+[owned browser lifecycle example](examples/owned-browser-lifecycle/) shows how
+to record ownership, use an internal deadline, close on every exit path, and
+verify the owned root exited.
+
 ## Safety guarantees
 
 The bundled runtime uses only the Python standard library. It performs no
