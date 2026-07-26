@@ -68,11 +68,13 @@ Result:
 Valid skill: C:\Users\Admin\.codex\skills\resource-safe-execution
 ```
 
-The previous local installation was preserved as a timestamped backup. The
-release is `v0.1.0`. Claude Code, Antigravity, physical macOS, physical Linux,
-and every proprietary client runtime check remain unavailable or unperformed.
-The completed hosted run supports CI-validation claims only; it is not a
-substitute for physical-host or proprietary-client evidence.
+The previous local installation was preserved as a timestamped backup.
+The current package release is `v0.2.0`.
+Its canonical skill payload remains the checksum-audited `v0.1.0` payload.
+Claude Code, Antigravity, physical macOS, physical Linux, and every proprietary
+client runtime check remain unavailable or unperformed. The completed hosted
+run supports CI-validation claims only; it is not a substitute for
+physical-host or proprietary-client evidence.
 
 ## Sources and claim limits
 

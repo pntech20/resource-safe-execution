@@ -39,7 +39,7 @@ class GrowthSurfaceTests(unittest.TestCase):
         text = README.read_text(encoding="utf-8")
         self.assertIn(
             "https://github.com/pntech20/resource-safe-execution/"
-            "tree/v0.1.0/skills/resource-safe-execution",
+            "tree/v0.2.0/skills/resource-safe-execution",
             text,
         )
         self.assertIn("skill-manifest.json", text)
