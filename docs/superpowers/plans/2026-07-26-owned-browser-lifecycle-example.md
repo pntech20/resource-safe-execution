@@ -225,8 +225,8 @@ git commit -m "feat: add owned browser lifecycle harness"
 **Files:**
 - Create: `examples/owned-browser-lifecycle/README.md`
 - Create: `docs/case-studies/orphaned-browser-software-renderer.md`
+- Create: `tests/test_owned_browser_example.py`
 - Modify: `README.md`
-- Modify: `.github/workflows/ci.yml`
 
 **Interfaces:**
 - Consumes: the Task 2 harness and its public ownership record.
@@ -257,11 +257,22 @@ owned cleanup, and renderer/exit verification. Use no incident identifiers.
 
 - [ ] **Step 3: Link the material and run Node tests in CI**
 
-Add a README link near the safety model. Add this CI step after Python tests:
+Add a README link near the safety model. Add a Python bridge test so the
+existing three-OS CI matrix invokes the Node suite:
 
-```yaml
-- name: Test owned browser lifecycle example
-  run: node --test examples/owned-browser-lifecycle/with-owned-browser.test.cjs
+```python
+def test_node_lifecycle_contract_passes(self) -> None:
+    node = shutil.which("node")
+    self.assertIsNotNone(node)
+    result = subprocess.run(
+        [node, "--test", str(NODE_TEST)],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 ```
 
 - [ ] **Step 4: Run privacy and repository verification**
@@ -283,7 +294,7 @@ the validator exits zero; the diff check is clean.
 - [ ] **Step 5: Commit documentation and CI**
 
 ```powershell
-git add README.md .github/workflows/ci.yml examples docs/case-studies
+git add README.md examples docs/case-studies tests/test_owned_browser_example.py
 git commit -m "docs: publish orphaned browser prevention guide"
 ```
 

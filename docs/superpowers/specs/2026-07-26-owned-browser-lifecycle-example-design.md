@@ -84,8 +84,8 @@ harmless child process:
 6. a stalled ownership callback reaches the same deadline and closes its child.
 
 The tests will not launch a browser, use the network, install packages, or
-terminate processes by executable name. CI will run the Node tests on the
-existing Windows, macOS, and Linux matrix.
+terminate processes by executable name. A Python bridge test will run the Node
+tests inside the existing Windows, macOS, and Linux CI matrix.
 
 ## 6. Documentation
 
